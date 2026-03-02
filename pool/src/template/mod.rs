@@ -315,11 +315,22 @@ impl TemplateEngine {
             if delay_ms > 0 {
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             }
-            match self.rpc.call::<Option<String>>("submitblock", json!([block_hex])).await {
+            // call_optional returns Ok(None) for null (accepted), Ok(Some(reason)) for
+            // rejection, and Err for network/RPC failures. Using call::<Option<String>>
+            // would return Err for the null-success case (serde maps null→None, then
+            // ok_or_else converts None to Err), causing false "BLOCK MAY BE LOST" logs.
+            match self.rpc.call_optional::<String>("submitblock", json!([block_hex])).await {
+                Ok(None) => {
+                    // null result = Bitcoin Core accepted the block.
+                    self.counters.inc_submitblock_accepted();
+                    last_submit_err = None;
+                    break;
+                }
                 Ok(Some(reason)) => {
-                    // Bitcoin Core accepted the call but returned a rejection reason.
+                    // Non-null string = Bitcoin Core returned a rejection reason.
                     if reason == "duplicate" {
                         tracing::warn!("submitblock: already known (duplicate) — block counted as found");
+                        self.counters.inc_submitblock_accepted();
                         return Ok(());
                     }
 
@@ -361,11 +372,6 @@ impl TemplateEngine {
                     }
                     self.counters.inc_submitblock_rejected();
                     return Err(anyhow!("submitblock rejected: {reason} (category: {category})"));
-                }
-                Ok(None) => {
-                    // null == accepted by Bitcoin Core
-                    last_submit_err = None;
-                    break;
                 }
                 Err(err) => {
                     tracing::error!(

@@ -100,10 +100,15 @@ pub struct PoolCounters {
     pub duplicate_shares:       AtomicU64,
     /// Total miner reconnections since pool start.
     pub reconnects_total:       AtomicU64,
+    /// submitblock calls accepted by Bitcoin Core (null result = success).
+    pub submitblock_accepted:   AtomicU64,
     /// submitblock calls that returned an error string from Bitcoin Core.
     pub submitblock_rejected:   AtomicU64,
     /// submitblock RPC calls that failed entirely (network/timeout).
     pub submitblock_rpc_fail:   AtomicU64,
+    /// Shares rejected because version bits outside the negotiated BIP310 mask
+    /// were modified by the miner — indicates broken firmware.
+    pub version_rolling_violations: AtomicU64,
     /// Stales caused by a new block clearing the job table.
     pub stales_new_block:       AtomicU64,
     /// Stales where the job was simply expired / unknown.
@@ -131,8 +136,10 @@ impl PoolCounters {
     pub fn notify_rate_limited(&self)    -> u64 { self.notify_rate_limited.load(Ordering::Relaxed) }
     pub fn duplicate_shares(&self)       -> u64 { self.duplicate_shares.load(Ordering::Relaxed) }
     pub fn reconnects_total(&self)       -> u64 { self.reconnects_total.load(Ordering::Relaxed) }
+    pub fn submitblock_accepted(&self)   -> u64 { self.submitblock_accepted.load(Ordering::Relaxed) }
     pub fn submitblock_rejected(&self)   -> u64 { self.submitblock_rejected.load(Ordering::Relaxed) }
     pub fn submitblock_rpc_fail(&self)   -> u64 { self.submitblock_rpc_fail.load(Ordering::Relaxed) }
+    pub fn version_rolling_violations(&self) -> u64 { self.version_rolling_violations.load(Ordering::Relaxed) }
     pub fn stales_new_block(&self)       -> u64 { self.stales_new_block.load(Ordering::Relaxed) }
     pub fn stales_expired(&self)         -> u64 { self.stales_expired.load(Ordering::Relaxed) }
     pub fn stales_reconnect(&self)       -> u64 { self.stales_reconnect.load(Ordering::Relaxed) }
@@ -149,8 +156,10 @@ impl PoolCounters {
     pub fn inc_notify_rate_limited(&self) { self.notify_rate_limited.fetch_add(1, Ordering::Relaxed); }
     pub fn inc_duplicate_share(&self) { self.duplicate_shares.fetch_add(1, Ordering::Relaxed); }
     pub fn inc_reconnect(&self)       { self.reconnects_total.fetch_add(1, Ordering::Relaxed); }
+    pub fn inc_submitblock_accepted(&self) { self.submitblock_accepted.fetch_add(1, Ordering::Relaxed); }
     pub fn inc_submitblock_rejected(&self) { self.submitblock_rejected.fetch_add(1, Ordering::Relaxed); }
     pub fn inc_submitblock_rpc_fail(&self) { self.submitblock_rpc_fail.fetch_add(1, Ordering::Relaxed); }
+    pub fn inc_version_rolling_violation(&self) { self.version_rolling_violations.fetch_add(1, Ordering::Relaxed); }
     pub fn inc_stale(&self, reason: StaleReason) {
         match reason {
             StaleReason::NewBlock  => self.stales_new_block.fetch_add(1, Ordering::Relaxed),

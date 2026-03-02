@@ -368,6 +368,81 @@ mod tests {
         assert_eq!(expected & mask, miner_bits & mask);
     }
 
+    // ── Version rolling: outside_mismatch detection ───────────────────────────
+    //
+    // These tests verify the logic pool uses to decide whether to REJECT a share
+    // (outside_mismatch = true) vs accept it (outside_mismatch = false).
+    //
+    // Pool formula (matches stratum/mod.rs):
+    //   submit_outside   = submit_val & !mask
+    //   job_outside      = job_val    & !mask
+    //   outside_mismatch = submit_outside != 0 && submit_outside != job_outside
+
+    fn check_outside_mismatch(submit_val: u32, job_val: u32, mask: u32) -> bool {
+        let submit_outside = submit_val & !mask;
+        let job_outside    = job_val    & !mask;
+        submit_outside != 0 && submit_outside != job_outside
+    }
+
+    /// Miner only rolls bits inside the mask → no violation.
+    #[test]
+    fn test_version_outside_mask_clean() {
+        let mask:    u32 = 0x1fffe000;
+        let job_val: u32 = 0x2000_0000;
+        // miner rolls some bits inside the mask, doesn't touch bits outside
+        let submit:  u32 = 0x2003_c000; // bits 14–15 set (inside mask)
+        assert!(!check_outside_mismatch(submit, job_val, mask),
+            "bits only inside mask must not trigger violation");
+    }
+
+    /// Miner preserves the job's outside-mask bits (sends them unchanged) → no violation.
+    #[test]
+    fn test_version_outside_mask_preserved() {
+        let mask:    u32 = 0x1fffe000;
+        let job_val: u32 = 0x2000_0000;
+        // miner sends the same outside-mask bits as the job
+        let submit:  u32 = job_val | 0x0001_c000; // rolls bits 14-16 (inside mask)
+        assert!(!check_outside_mismatch(submit, job_val, mask),
+            "preserved outside-mask bits must not trigger violation");
+    }
+
+    /// Miner changes bit 29 (outside mask, consensus-critical) → violation.
+    #[test]
+    fn test_version_outside_mask_changed_high_bit() {
+        let mask:    u32 = 0x1fffe000;
+        let job_val: u32 = 0x2000_0000; // bit 29 = 1 (correct)
+        // miner flips bit 29 off — this would produce an invalid block version
+        let submit:  u32 = 0x0000_0000;
+        assert!(check_outside_mismatch(submit, job_val, mask),
+            "changed bit outside mask must trigger violation");
+    }
+
+    /// Miner sets an arbitrary extra outside-mask bit → violation.
+    #[test]
+    fn test_version_outside_mask_extra_bit() {
+        let mask:    u32 = 0x1fffe000;
+        let job_val: u32 = 0x2000_0000;
+        // miner sets bit 0 (outside mask) — unexpected garbage bit
+        let submit:  u32 = job_val | 0x0000_0001;
+        assert!(check_outside_mismatch(submit, job_val, mask),
+            "extra bit outside mask must trigger violation");
+    }
+
+    /// After violation detection, the pool ALWAYS uses the safe combined formula.
+    /// This verifies no miner-supplied garbage leaks into the block header.
+    #[test]
+    fn test_version_combined_is_always_safe() {
+        let mask:    u32 = 0x1fffe000;
+        let job_val: u32 = 0x2000_0000;
+        let submit:  u32 = 0x003f_0001; // bits inside AND outside mask
+        // combined must not contain the outside-mask garbage from miner
+        let combined = (job_val & !mask) | (submit & mask);
+        assert_eq!(combined & !mask, job_val & !mask,
+            "outside-mask bits in combined must always come from the job");
+        assert_eq!(combined & mask, submit & mask,
+            "inside-mask bits in combined must come from the miner");
+    }
+
     /// Duplicate key logic: same job + same fields → duplicate.
     /// Mirrors the format!() in handle_submit exactly.
     fn make_dup_key(job_id: &str, nonce: &str, ntime: &str, en2: &str, ver: &str) -> String {

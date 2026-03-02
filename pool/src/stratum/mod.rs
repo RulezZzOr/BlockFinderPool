@@ -805,28 +805,47 @@ impl StratumServer {
 let job = session_job.job.clone();
         let job_diff = session_job.difficulty;
 
-        // Version rolling:
-        // Some miners submit a full 32-bit version value even when only a mask is negotiated.
-        // We should only reject if bits *outside* the mask differ from the job's version.
+        // Version rolling (BIP310):
+        //   allowed bits = version_mask (negotiated via mining.configure)
+        //   combined     = (job_bits_outside_mask) | (miner_bits_inside_mask)
+        //
+        // If the miner modified bits OUTSIDE the negotiated mask the share is
+        // rejected immediately with error [20].  Silent acceptance would build a
+        // block whose nVersion contains bits the pool never agreed to roll,
+        // which Bitcoin Core may reject as invalid.
         let (version, version_outside_mask) = if let Some(submit_val) =
             submit_version.as_deref().and_then(parse_u32_be)
         {
             let job_val = parse_u32_be(&job.version).unwrap_or(job.version_u32);
             let submit_outside = submit_val & !version_mask;
-            let job_outside = job_val & !version_mask;
+            let job_outside   = job_val   & !version_mask;
+            // outside_mismatch: miner changed bits the pool did not authorise.
             let outside_mismatch = submit_outside != 0 && submit_outside != job_outside;
-            let combined = if !outside_mismatch {
-                (job_val & !version_mask) | (submit_val & version_mask)
-            } else {
-                warn!(
-                    "version outside mask from {worker}: submit={submit_val:08x} job={job_val:08x} mask={version_mask:08x}"
-                );
-                submit_val
-            };
+            // Always use the safe combined value; never let the miner's raw bits
+            // outside the mask reach block construction.
+            let combined = (job_val & !version_mask) | (submit_val & version_mask);
             (Some(format!("{:08x}", combined)), outside_mismatch)
         } else {
             (None, false) // validate_share will fall back to job.version_u32
         };
+
+        if version_outside_mask {
+            self.metrics.counters.inc_version_rolling_violation();
+            warn!(
+                "version-rolling violation worker={worker}: bits outside mask modified — rejecting share"
+            );
+            let resp = json!({
+                "id": request.id,
+                "result": false,
+                "error": [20, "Version bits outside negotiated mask", null]
+            });
+            let _ = tx.send(resp.to_string()).await;
+            self.metrics.record_share(
+                &worker, session_job.difficulty, 0.0, false, false,
+                0, 0.0, 0, 0, false,
+            ).await;
+            return Ok(());
+        }
 
         let submit = ShareSubmit {
             worker: worker.clone(),

@@ -201,8 +201,10 @@ struct PoolInfo {
     // zmqTxSuppressed = post-block 15s window (see zmqTxSuppressed in ZMQ section)
     duplicateShares: u64,
     reconnectsTotal: u64,
+    submitblockAccepted: u64,
     submitblockRejected: u64,
     submitblockRpcFail: u64,
+    versionRollingViolations: u64,
     // Stale classification
     stalesNewBlock: u64,
     stalesExpired: u64,
@@ -287,8 +289,10 @@ async fn pool(State(state): State<ApiState>) -> impl IntoResponse {
         notifyRateLimited:  c.notify_rate_limited(),
         duplicateShares:    c.duplicate_shares(),
         reconnectsTotal:      c.reconnects_total(),
+        submitblockAccepted:  c.submitblock_accepted(),
         submitblockRejected:  c.submitblock_rejected(),
         submitblockRpcFail:   c.submitblock_rpc_fail(),
+        versionRollingViolations: c.version_rolling_violations(),
         stalesNewBlock:       c.stales_new_block(),
         stalesExpired:        c.stales_expired(),
         stalesReconnect:      c.stales_reconnect(),
