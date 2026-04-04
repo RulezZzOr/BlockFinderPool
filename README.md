@@ -3,6 +3,13 @@
 A self-hosted Bitcoin solo mining pool designed for Umbrel home nodes.
 Zero fee — 100% of every block reward goes directly to the miner's own address.
 
+![ScreenShot](Img1.png)
+![ScreenShot](Img2.png)
+![ScreenShot](Img3.png)
+
+
+
+
 ---
 
 ## Architecture
