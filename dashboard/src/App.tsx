@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import {
-  PoolStats, Miner, NetworkInfo, BlockRow, TemplateInfo,
-  fetchPool, fetchMiners, fetchTemplateInfo,
+  PoolStats, Miner, NetworkInfo, BlockRow,
+  fetchPool, fetchMiners,
   fmtHr, fmtDiff, fmtNetHash, fmtUptime, fmtBlockInterval, timeAgo, shortWorker, shortAddress, getFirmwareLabel,
   blockSubsidy, fmtBtc,
 } from "./api";
@@ -703,13 +703,6 @@ function Header({ live }: { live: boolean }) {
         <div className="bh-logo-text">Black<span>Hole</span></div>
       </div>
 
-      <nav className="bh-nav">
-        <a href="#bh-top"      className="bh-nav-link bh-nav-active">DASHBOARD</a>
-        <a href="#bh-fleet"    className="bh-nav-link">MINERS</a>
-        <a href="#bh-core"     className="bh-nav-link">CORE</a>
-        <a href="#bh-stats"    className="bh-nav-link">STATS</a>
-      </nav>
-
       <div className={`bh-status-badge ${live ? "bh-status-live" : "bh-status-offline"}`}>
         {live ? "LIVE" : "OFFLINE"}
       </div>
@@ -718,118 +711,6 @@ function Header({ live }: { live: boolean }) {
 }
 
 // ─── Hero ─────────────────────────────────────────────────────────────────────
-
-function Hero({
-  pool, miners, network, live, templateInfo,
-}: {
-  pool: PoolStats | null;
-  miners: Miner[];
-  network: NetworkInfo | null;
-  live: boolean;
-  templateInfo: TemplateInfo | null;
-}) {
-  const bestDiff    = miners.reduce((mx, m) => Math.max(mx, m.best_submitted_difficulty ?? 0), 0);
-  const poolHr      = (pool?.totalHashRate ?? 0);
-  const networkDiff = network?.difficulty ?? 0;
-
-  // ── BEST SHARE: % of network difficulty (how close to a block) ───────────
-  const bestDiffPct = networkDiff > 0 && bestDiff > 0
-    ? (bestDiff / networkDiff * 100)
-    : 0;
-
-  // ── BLOCK REWARD: subsidy + fees from live template ───────────────────────
-  const coinbaseVal  = templateInfo?.coinbasevalue ?? 0;           // satoshis
-  const height       = templateInfo?.height ?? pool?.blockHeight ?? 0;
-  const subsidy      = blockSubsidy(height);                       // satoshis
-  const fees         = coinbaseVal > 0 ? Math.max(0, coinbaseVal - subsidy) : 0;
-  const txCount      = templateInfo?.transactions ?? 0;
-
-  const stats = [
-    {
-      label: "BLOCK HEIGHT",
-      value: pool ? `#${pool.blockHeight.toLocaleString()}` : "—",
-      sub:   pool ? `${fmtUptime(pool.uptimeSecs)} uptime` : "—",
-      color: "var(--blue)",
-    },
-    {
-      label: "POOL HASHRATE",
-      value: pool ? fmtHr(poolHr / 1e9) : "—",
-      sub:   "Live",
-      color: "var(--orange)",
-    },
-    {
-      label: "MINERS",
-      value: pool ? String(pool.totalMiners) : "—",
-      sub:   "Connected",
-      color: "var(--text)",
-    },
-    {
-      label: "BEST SHARE",
-      value: bestDiff > 0 ? fmtDiff(bestDiff) : "—",
-      // ✅ Fixed: show % of network difficulty, not pool hashrate %
-      sub:   bestDiffPct > 0
-        ? `${bestDiffPct.toFixed(4)}% of network diff`
-        : "awaiting…",
-      color: "var(--yellow)",
-    },
-    {
-      label: "BLOCK REWARD",
-      // Live subsidy + fees from current mempool template
-      value: coinbaseVal > 0 ? fmtBtc(coinbaseVal) : "—",
-      sub:   fees > 0
-        ? `+${fmtBtc(fees)} fees · ${txCount.toLocaleString()} txs`
-        : subsidy > 0 ? `${fmtBtc(subsidy)} subsidy` : "loading…",
-      color: "var(--green)",
-    },
-    {
-      label: "NODE STATUS",
-      value: live ? "SYNCED" : "OFFLINE",
-      sub:   live ? "100%" : "reconnecting…",
-      color: live ? "var(--green)" : "var(--red)",
-      dot:   live,
-    },
-  ];
-
-  return (
-    <section className="bh-hero" id="bh-top">
-      {/* ── Left column ── */}
-      <div className="bh-hero-left">
-        <p className="bh-hero-eyebrow">SOLO BITCOIN MINING</p>
-        <h1 className="bh-hero-title">COMMAND<br/>CENTER</h1>
-        <p className="bh-hero-sub">
-          Power. Control. Sovereignty.<br />
-          Mine Bitcoin on your terms.
-        </p>
-        <div className="bh-hero-actions">
-          <a href="#bh-fleet" className="bh-hero-btn-primary">▶ VIEW MINERS</a>
-          <a href="#bh-stats" className="bh-hero-btn-secondary">VIEW STATS</a>
-        </div>
-      </div>
-
-      {/* ── Right visual ── */}
-      <div className="bh-hero-right">
-        <img src="/bh-logo.png" alt="BlackHole" className="bh-hero-logo-img" />
-      </div>
-
-      {/* ── Stat bar ── */}
-      <div className="bh-hero-statbar">
-        {stats.map(s => (
-          <div key={s.label} className="bh-hero-stat">
-            <p className="bh-hero-stat-label">{s.label}</p>
-            <p className="bh-hero-stat-value" style={{ color: s.color }}>
-              {"dot" in s && (
-                <span className={`bh-indicator ${s.dot ? "bh-ind-green" : "bh-ind-red"}`}
-                      style={{ marginRight: 6 }} />
-              )}
-              {s.value}
-            </p>
-            <p className="bh-hero-stat-sub">{s.sub}</p>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
 
 // ─── Network Bar ──────────────────────────────────────────────────────────────
 
@@ -1072,7 +953,6 @@ export default function App() {
   const [network, setNetwork] = useState<NetworkInfo | null>(null);
   const [live, setLive] = useState(false);
   const [celebrating, setCelebrating] = useState(false);
-  const [templateInfo, setTemplateInfo] = useState<TemplateInfo | null>(null);
 
   const prevBlocksFound    = useRef<number>(0);
   const prevSubmitAccepted = useRef<number>(0);
@@ -1093,10 +973,9 @@ export default function App() {
       // getmininginfo RPC.
       // [Fix 3] Use allSettled so a flaky /miners response does NOT flip
       // the dashboard OFFLINE; pool health drives the LIVE indicator.
-      const [poolResult, minersResult, templateResult] = await Promise.allSettled([
+      const [poolResult, minersResult] = await Promise.allSettled([
         fetchPool(),
         fetchMiners(),
-        fetchTemplateInfo(),
       ]);
 
       if (poolResult.status === "fulfilled") {
@@ -1137,10 +1016,6 @@ export default function App() {
       if (minersResult.status === "fulfilled") {
         setMiners(minersResult.value);
       }
-
-      if (templateResult.status === "fulfilled" && templateResult.value) {
-        setTemplateInfo(templateResult.value);
-      }
     } finally {
       // [Fix 2] Always release the guard, even on errors.
       loadingRef.current = false;
@@ -1163,7 +1038,7 @@ export default function App() {
       )}
 
       <Header live={live} />
-      <Hero pool={pool} miners={miners} network={network} live={live} templateInfo={templateInfo} />
+      <NetworkBar pool={pool} network={network} />
 
       {/* Row 1: Bitcoin Core | Core Visual | Share Flow */}
       <div className="bh-section-title" id="bh-core">

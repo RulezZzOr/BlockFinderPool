@@ -257,11 +257,12 @@ impl TemplateEngine {
     }
 
     pub async fn start(&self) -> anyhow::Result<()> {
-        // Kick an initial template fetch so miners can start immediately.
-        // We don't fail the whole pool if bitcoind isn't ready yet (Umbrel may start services in parallel).
-        if let Err(err) = self.refresh_template().await {
-            warn!("initial template refresh failed (will retry via poll/ZMQ): {err:?}");
-        }
+        info!(
+            "template engine starting: block_zmq_endpoints={} tx_zmq_endpoints={} template_poll_ms={}",
+            self.config.zmq_block_urls.len(),
+            self.config.zmq_tx_urls.len(),
+            self.config.template_poll_ms
+        );
 
         if self.config.template_poll_ms > 0 {
             let poll_engine = self.clone();
@@ -287,7 +288,65 @@ impl TemplateEngine {
             });
         }
 
+        self.warm_initial_template().await?;
+
         Ok(())
+    }
+
+    async fn warm_initial_template(&self) -> anyhow::Result<()> {
+        const MAX_ATTEMPTS: usize = 12;
+        const ATTEMPT_TIMEOUT_SECS: u64 = 15;
+        const RETRY_DELAY_SECS: u64 = 2;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            eprintln!(
+                "blackhole-pool init: initial template warmup attempt {attempt}/{MAX_ATTEMPTS}"
+            );
+            info!(
+                "initial template warmup attempt {attempt}/{MAX_ATTEMPTS} (timeout={}s)",
+                ATTEMPT_TIMEOUT_SECS
+            );
+
+            match tokio::time::timeout(
+                Duration::from_secs(ATTEMPT_TIMEOUT_SECS),
+                self.refresh_template(),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    eprintln!("blackhole-pool init: connected to bitcoind; initial template loaded");
+                    info!("connected to bitcoind; initial template loaded");
+                    return Ok(());
+                }
+                Ok(Err(err)) => {
+                    eprintln!(
+                        "blackhole-pool init: initial template warmup failed on attempt {attempt}/{MAX_ATTEMPTS}: {err:?}"
+                    );
+                    warn!(
+                        "initial template warmup failed on attempt {attempt}/{MAX_ATTEMPTS}: {err:?}"
+                    );
+                }
+                Err(_) => {
+                    eprintln!(
+                        "blackhole-pool init: initial template warmup timed out after {}s on attempt {attempt}/{MAX_ATTEMPTS}",
+                        ATTEMPT_TIMEOUT_SECS
+                    );
+                    warn!(
+                        "initial template warmup timed out after {}s on attempt {attempt}/{MAX_ATTEMPTS}",
+                        ATTEMPT_TIMEOUT_SECS
+                    );
+                }
+            }
+
+            if attempt < MAX_ATTEMPTS {
+                tokio::time::sleep(Duration::from_secs(RETRY_DELAY_SECS)).await;
+            }
+        }
+
+        eprintln!("blackhole-pool init: initial template warmup failed after {MAX_ATTEMPTS} attempts");
+        Err(anyhow!(
+            "initial template warmup failed after {MAX_ATTEMPTS} attempts; bitcoind/ZMQ may not be ready"
+        ))
     }
 
     /// Submit a solved block to Bitcoin Core.
@@ -493,6 +552,14 @@ impl TemplateEngine {
         let engine = self.clone();
         tokio::task::spawn_blocking(move || {
             loop {
+                eprintln!(
+                    "blackhole-pool init: starting ZMQ block subscription setup ({} endpoint(s))",
+                    zmq_urls.len()
+                );
+                info!(
+                    "starting ZMQ block subscription setup ({} endpoint(s))",
+                    zmq_urls.len()
+                );
                 let ctx = zmq::Context::new();
                 let socket = match ctx.socket(zmq::SUB) {
                     Ok(sock) => sock,
@@ -525,8 +592,18 @@ impl TemplateEngine {
                 // Each endpoint only publishes its own topic; subscribing to both
                 // on a multi-connected socket guarantees coverage regardless of which
                 // port(s) are reachable.
-                socket.set_subscribe(b"hashblock").ok();
-                socket.set_subscribe(b"rawblock").ok();
+                if let Err(err) = socket.set_subscribe(b"hashblock") {
+                    warn!("ZMQ block subscribe failed (hashblock): {err:?}");
+                    std::thread::sleep(Duration::from_secs(2));
+                    continue;
+                }
+                if let Err(err) = socket.set_subscribe(b"rawblock") {
+                    warn!("ZMQ block subscribe failed (rawblock): {err:?}");
+                    std::thread::sleep(Duration::from_secs(2));
+                    continue;
+                }
+                eprintln!("blackhole-pool init: ZMQ block subscribed to hashblock/rawblock");
+                info!("ZMQ block subscribed to hashblock/rawblock");
 
                 loop {
                     // Bitcoin Core ZMQ notifications are multipart:
@@ -611,6 +688,14 @@ impl TemplateEngine {
         let engine = self.clone();
         tokio::task::spawn_blocking(move || {
             loop {
+                eprintln!(
+                    "blackhole-pool init: starting ZMQ tx subscription setup ({} endpoint(s))",
+                    zmq_urls.len()
+                );
+                info!(
+                    "starting ZMQ tx subscription setup ({} endpoint(s))",
+                    zmq_urls.len()
+                );
                 let ctx = zmq::Context::new();
                 let socket = match ctx.socket(zmq::SUB) {
                     Ok(sock) => sock,
@@ -636,8 +721,18 @@ impl TemplateEngine {
                     continue;
                 }
                 // Bitcoin Core topics: rawtx / hashtx. We'll subscribe to hashtx (small payload).
-                socket.set_subscribe(b"hashtx").ok();
-                socket.set_subscribe(b"rawtx").ok();
+                if let Err(err) = socket.set_subscribe(b"hashtx") {
+                    warn!("ZMQ tx subscribe failed (hashtx): {err:?}");
+                    std::thread::sleep(Duration::from_secs(2));
+                    continue;
+                }
+                if let Err(err) = socket.set_subscribe(b"rawtx") {
+                    warn!("ZMQ tx subscribe failed (rawtx): {err:?}");
+                    std::thread::sleep(Duration::from_secs(2));
+                    continue;
+                }
+                eprintln!("blackhole-pool init: ZMQ tx subscribed to hashtx/rawtx");
+                info!("ZMQ tx subscribed to hashtx/rawtx");
 
                 loop {
                     // Bitcoin Core ZMQ notifications are multipart:

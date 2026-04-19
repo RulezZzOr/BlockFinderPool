@@ -27,8 +27,10 @@ use crate::template::TemplateEngine;
 async fn main() -> anyhow::Result<()> {
     eprintln!("blackhole-pool booting");
     eprintln!("build info: {}", crate::build_info::one_line());
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "info".parse().expect("valid default log filter"));
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(env_filter)
         .init();
 
     if let Err(err) = run().await {
@@ -41,6 +43,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run() -> anyhow::Result<()> {
+    eprintln!("blackhole-pool init: loading config");
     let config = Config::from_env().context("load config")?;
 
     // ── Payout address info ───────────────────────────────────────────────────
@@ -81,22 +84,23 @@ async fn run() -> anyhow::Result<()> {
     }
 
     let metrics = MetricsStore::new();
+    eprintln!("blackhole-pool init: connecting storage backends");
 
-    
-// Only connect storage backends when they are actually needed.
-let redis = if config.persist_shares {
-    RedisStore::connect(config.redis_url.as_deref()).await?
-} else {
-    RedisStore::connect(None).await?
-};
+    // Only connect storage backends when they are actually needed.
+    let redis = if config.persist_shares {
+        RedisStore::connect(config.redis_url.as_deref()).await?
+    } else {
+        RedisStore::connect(None).await?
+    };
 
-let sqlite_needed = config.persist_shares || config.persist_blocks;
-let sqlite = if sqlite_needed {
-    SqliteStore::connect(config.database_url.as_deref()).await?
-} else {
-    SqliteStore::connect(None).await?
-};
+    let sqlite_needed = config.persist_shares || config.persist_blocks;
+    let sqlite = if sqlite_needed {
+        SqliteStore::connect(config.database_url.as_deref()).await?
+    } else {
+        SqliteStore::connect(None).await?
+    };
 
+    eprintln!("blackhole-pool init: storage ready");
 
     // Restore persisted best_difficulty for all known workers so that
     // the all-time best share counter survives pool restarts.
@@ -122,7 +126,9 @@ let sqlite = if sqlite_needed {
 
     let template_engine = Arc::new(TemplateEngine::new(config.clone(), rpc.clone(), metrics.counters.clone()));
 
+    eprintln!("blackhole-pool init: warming template engine");
     template_engine.start().await?;
+    eprintln!("blackhole-pool init: template engine ready");
 
     let stratum = StratumServer::new(
         config.clone(),
@@ -132,70 +138,71 @@ let sqlite = if sqlite_needed {
         sqlite.clone(),
     );
 
-let stratum_handle = tokio::spawn(async move { stratum.run().await });
+    eprintln!("blackhole-pool init: starting stratum/api servers");
+    let stratum_handle = tokio::spawn(async move { stratum.run().await });
 
-// API server is optional (disable for max-perf endpoints).
-let api_handle = if config.api_enabled {
-    let api = ApiServer::new(config.clone(), metrics.clone(), sqlite, rpc, template_engine.clone());
-    Some(tokio::spawn(async move { api.run().await }))
-} else {
-    None
-};
+    // API server is optional (disable for max-perf endpoints).
+    let api_handle = if config.api_enabled {
+        let api = ApiServer::new(config.clone(), metrics.clone(), sqlite, rpc, template_engine.clone());
+        Some(tokio::spawn(async move { api.run().await }))
+    } else {
+        None
+    };
 
-
-if let Some(api_handle) = api_handle {
-    tokio::select! {
-        res = stratum_handle => {
-            match res {
-                Ok(Ok(())) => info!("stratum stopped"),
-                Ok(Err(err)) => {
-                    error!("stratum exited with error: {err:?}");
-                    return Err(err).context("stratum exited");
-                }
-                Err(err) => {
-                    error!("stratum task failed: {err:?}");
-                    return Err(err).context("stratum task join failed");
+    if let Some(api_handle) = api_handle {
+        tokio::select! {
+            res = stratum_handle => {
+                match res {
+                    Ok(Ok(())) => info!("stratum stopped"),
+                    Ok(Err(err)) => {
+                        error!("stratum exited with error: {err:?}");
+                        return Err(err).context("stratum exited");
+                    }
+                    Err(err) => {
+                        error!("stratum task failed: {err:?}");
+                        return Err(err).context("stratum task join failed");
+                    }
                 }
             }
-        }
-        res = api_handle => {
-            match res {
-                Ok(Ok(())) => info!("api stopped"),
-                Ok(Err(err)) => {
-                    error!("api exited with error: {err:?}");
-                    return Err(err).context("api exited");
-                }
-                Err(err) => {
-                    error!("api task failed: {err:?}");
-                    return Err(err).context("api task join failed");
+            res = api_handle => {
+                match res {
+                    Ok(Ok(())) => info!("api stopped"),
+                    Ok(Err(err)) => {
+                        error!("api exited with error: {err:?}");
+                        return Err(err).context("api exited");
+                    }
+                    Err(err) => {
+                        error!("api task failed: {err:?}");
+                        return Err(err).context("api task join failed");
+                    }
                 }
             }
+            _ = tokio::signal::ctrl_c() => {
+                info!("shutdown signal received");
+            }
         }
-        _ = tokio::signal::ctrl_c() => {
-            info!("shutdown signal received");
+    } else {
+        // API disabled: wait on stratum only (or ctrl-c)
+        tokio::select! {
+            res = stratum_handle => {
+                match res {
+                    Ok(Ok(())) => info!("stratum stopped"),
+                    Ok(Err(err)) => {
+                        error!("stratum exited with error: {err:?}");
+                        return Err(err).context("stratum exited");
+                    }
+                    Err(err) => {
+                        error!("stratum task failed: {err:?}");
+                        return Err(err).context("stratum task join failed");
+                    }
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                info!("shutdown signal received");
+            }
         }
     }
-} else {
-    // API disabled: wait on stratum only (or ctrl-c)
-    tokio::select! {
-        res = stratum_handle => {
-            match res {
-                Ok(Ok(())) => info!("stratum stopped"),
-                Ok(Err(err)) => {
-                    error!("stratum exited with error: {err:?}");
-                    return Err(err).context("stratum exited");
-                }
-                Err(err) => {
-                    error!("stratum task failed: {err:?}");
-                    return Err(err).context("stratum task join failed");
-                }
-            }
-        }
-        _ = tokio::signal::ctrl_c() => {
-            info!("shutdown signal received");
-        }
-    }
-}
 
+    eprintln!("blackhole-pool init: entering steady state");
 Ok(())
 }
