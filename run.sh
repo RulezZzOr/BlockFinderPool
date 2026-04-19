@@ -4,6 +4,17 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
+# Prefer modern `docker compose`, but fall back to legacy `docker-compose`
+# when the plugin is not available on the target server.
+if docker compose version >/dev/null 2>&1; then
+  DC=(docker compose)
+elif docker-compose version >/dev/null 2>&1; then
+  DC=(docker-compose)
+else
+  echo "docker compose / docker-compose not found" >&2
+  exit 1
+fi
+
 # ── Git provenance ────────────────────────────────────────────────────────────
 if git rev-parse --git-dir &>/dev/null 2>&1; then
   export BUILD_GIT_SHA="$(git rev-parse --verify HEAD 2>/dev/null || echo unknown)"
@@ -23,11 +34,11 @@ fi
 
 echo "[1/2] Building BlackHole…"
 # shellcheck disable=SC2086
-sudo -E docker compose $COMPOSE_FILES build
+sudo -E "${DC[@]}" $COMPOSE_FILES build
 
 echo "[2/2] Starting services…"
 # shellcheck disable=SC2086
-sudo -E docker compose $COMPOSE_FILES up -d
+sudo -E "${DC[@]}" $COMPOSE_FILES up -d
 
 echo ""
 echo "Status:"
