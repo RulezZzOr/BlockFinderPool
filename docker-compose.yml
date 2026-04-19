@@ -8,8 +8,7 @@ services:
         BUILD_SOURCE: ${BUILD_SOURCE:-docker-compose}
         BUILD_TIME_UTC: ${BUILD_TIME_UTC:-unknown}
         BUILD_IMAGE_ID: ${BUILD_IMAGE_ID:-unknown}
-    env_file:
-      - ./env/.env
+    env_file: ./env/.env
     environment:
       RUNTIME_IMAGE_REF: ${RUNTIME_IMAGE_REF:-blackhole-blackhole-pool:latest}
       RUNTIME_IMAGE_ID: ${RUNTIME_IMAGE_ID:-unknown}
