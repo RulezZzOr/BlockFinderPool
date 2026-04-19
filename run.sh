@@ -29,7 +29,7 @@ if [ -f "/home/umbrel/umbrel/umbrel.yaml" ] || \
    command -v umbreld &>/dev/null 2>&1; then
   COMPOSE_FILES="-f docker-compose.yml"
 else
-  COMPOSE_FILES="-f docker-compose.yml -f docker-compose.standalone.yml"
+  COMPOSE_FILES="-f docker-compose.standalone.yml"
 fi
 
 echo "[1/2] Building BlackHole…"
