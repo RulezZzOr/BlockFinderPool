@@ -16,7 +16,7 @@ Zero fee — 100% of every block reward goes directly to the miner's own address
 
 | Component | Technology | Port |
 |---|---|---|
-| Stratum server | Rust + Tokio | 2018 |
+| Stratum server | Rust + Tokio | 3333 |
 | REST API | Axum | 8081 (host) |
 | Dashboard | React + Nginx | 3334 (host) |
 | Bitcoin node | Bitcoin Core via RPC + ZMQ | (external) |
@@ -113,7 +113,7 @@ docker compose logs -f blackhole-pool
 You should see:
 
 ```
-INFO  stratum listening on 0.0.0.0:2018
+INFO  stratum listening on 0.0.0.0:3333
 INFO  ZMQ block connected: tcp://...
 INFO  new template: height=... txs=... ...
 ```
@@ -124,7 +124,7 @@ Configure your miner with:
 
 | Field | Value |
 |---|---|
-| URL | `stratum+tcp://YOUR_POOL_HOST:2018` |
+| URL | `stratum+tcp://YOUR_POOL_HOST:3333` |
 | Username | `YOUR_BITCOIN_ADDRESS` (e.g. `bc1q...`) |
 | Password | *(anything — leave blank or type `x`)* |
 
@@ -253,7 +253,7 @@ Bitcoin Core is not reachable. Check:
 
 ### Miner connects but no jobs are sent
 - Check that `mining.authorize` succeeds in the pool logs
-- Verify the Stratum port (2018) is reachable from the miner
+- Verify the Stratum port (3333) is reachable from the miner
 
 ### Block found but rejected
 - Check `docker compose logs pool | grep SUBMIT` for the rejection reason
@@ -293,11 +293,11 @@ BlackHole/
 
 ## Security notes
 
-- `AUTH_TOKEN` is empty by default — any miner that can reach port 2018 can connect.
+- `AUTH_TOKEN` is empty by default — any miner that can reach port 3333 can connect.
   Set it in `env/.env` if you want password-protected access.
 - Set `REQUIRE_AUTH_TOKEN=true` to make the pool refuse to start if `AUTH_TOKEN` is
   not set — useful as a safety net in network-facing deployments.
-- The pool is designed for a **personal home node**. Do not expose port 2018 to the
+- The pool is designed for a **personal home node**. Do not expose port 3333 to the
   internet unless you understand the implications.
 - Never commit `env/.env` to version control — it is listed in `.gitignore`.
 

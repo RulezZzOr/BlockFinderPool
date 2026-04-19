@@ -758,7 +758,7 @@ function Footer({ pool, miners }: { pool: PoolStats | null; miners: Miner[] }) {
         <span style={{ color: "var(--border2)" }}>·</span>
         <span>Fee: 0%</span>
         <span style={{ color: "var(--border2)" }}>·</span>
-        <span>Stratum: :2018</span>
+        <span>Stratum: :3333</span>
       </div>
       <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text3)" }}>
         Refresh 5s · {new Date().toLocaleTimeString()}

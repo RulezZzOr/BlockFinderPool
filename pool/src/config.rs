@@ -101,7 +101,7 @@ impl Config {
 
         let stratum_bind = env::var("STRATUM_BIND").unwrap_or_else(|_| "0.0.0.0".to_string());
         let stratum_port = env::var("STRATUM_PORT")
-            .unwrap_or_else(|_| "2018".to_string())
+            .unwrap_or_else(|_| "3333".to_string())
             .parse()
             .context("STRATUM_PORT must be a number")?;
 

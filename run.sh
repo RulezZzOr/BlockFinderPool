@@ -50,4 +50,4 @@ echo ""
 HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost)
 echo "  Dashboard : http://${HOST_IP}:3334"
 echo "  API       : http://${HOST_IP}:8081/pool"
-echo "  Stratum   : ${HOST_IP}:2018"
+echo "  Stratum   : ${HOST_IP}:3333"

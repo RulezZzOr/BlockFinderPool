@@ -547,7 +547,7 @@ PAYOUT_ADDRESS=${PAYOUT_ADDR}
 
 # ── Stratum ───────────────────────────────────────────────────────────────────
 STRATUM_BIND=0.0.0.0
-STRATUM_PORT=2018
+STRATUM_PORT=3333
 
 # ── API ───────────────────────────────────────────────────────────────────────
 API_BIND=0.0.0.0
@@ -783,10 +783,10 @@ echo -e "${BLD}${GRN}  ✓ BlackHole Pool is running!${RST}"
 echo ""
 echo -e "  ${BLD}Dashboard${RST}  →  http://${HOST_IP}:3334"
 echo -e "  ${BLD}API${RST}        →  http://${HOST_IP}:8081/pool"
-echo -e "  ${BLD}Stratum${RST}    →  ${HOST_IP}:2018"
+echo -e "  ${BLD}Stratum${RST}    →  ${HOST_IP}:3333"
 echo ""
 echo -e "  ${DIM}Configure your miner:${RST}"
-echo -e "  ${DIM}  URL:      stratum+tcp://${HOST_IP}:2018${RST}"
+echo -e "  ${DIM}  URL:      stratum+tcp://${HOST_IP}:3333${RST}"
 echo -e "  ${DIM}  Username: YOUR_BITCOIN_ADDRESS (e.g. bc1q...)${RST}"
 echo -e "  ${DIM}  Password: x  (or leave blank)${RST}"
 echo ""

@@ -14,7 +14,7 @@ services:
       RUNTIME_IMAGE_ID: ${RUNTIME_IMAGE_ID:-unknown}
       RUNTIME_CONTAINER_NAME: ${RUNTIME_CONTAINER_NAME:-blackhole-blackhole-pool-1}
     ports:
-      - "2018:2018"
+      - "3333:3333"
       - "8081:8080"
     volumes:
       - pool_data:/data
