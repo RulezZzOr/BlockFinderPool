@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# BlackHole Pool — Quick restart / rebuild
+# BlockFinder Pool — Quick restart / rebuild
 # Injects git provenance and selects the correct compose overlay automatically.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -37,7 +37,7 @@ else
   COMPOSE_FILES="-f docker-compose.standalone.yml"
 fi
 
-echo "[1/2] Building BlackHole…"
+echo "[1/2] Building BlockFinder…"
 # shellcheck disable=SC2086
 sudo -E "${DC[@]}" $COMPOSE_FILES build
 

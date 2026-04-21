@@ -147,8 +147,8 @@ impl Config {
         let payout_script_hex = opt_trimmed("PAYOUT_SCRIPT_HEX");
         let payout_address = env::var("PAYOUT_ADDRESS").unwrap_or_default();
 
-        let pool_tag = env::var("POOL_TAG").unwrap_or_else(|_| "BlackHole".to_string());
-        let coinbase_message = env::var("COINBASE_MESSAGE").unwrap_or_else(|_| "BlackHole".to_string());
+        let pool_tag = env::var("POOL_TAG").unwrap_or_else(|_| "BlockFinder".to_string());
+        let coinbase_message = env::var("COINBASE_MESSAGE").unwrap_or_else(|_| "BlockFinder".to_string());
 
         let extranonce1_size = env::var("EXTRANONCE1_SIZE")
             .unwrap_or_else(|_| "4".to_string())

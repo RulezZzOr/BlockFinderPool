@@ -32,14 +32,14 @@ function fmtK(n: number): string {
   return String(n);
 }
 
-// ─── BlackHole Core Visual ────────────────────────────────────────────────────
+// ─── BlockFinder Core Visual ──────────────────────────────────────────────────
 
 function CoreVisual({ pool }: { pool: PoolStats | null }) {
   return (
     <div className="bh-core-wrap bh-card bh-card-orange">
       <div className="bh-card-title">
         <span className="bh-card-title-dot" style={{ background: "var(--orange)" }} />
-        BlackHole Engine
+        BlockFinder Engine
       </div>
 
       <div className="bh-core-container">
@@ -50,7 +50,7 @@ function CoreVisual({ pool }: { pool: PoolStats | null }) {
         <div className="bh-core-glow" />
         <div className="bh-core-accent-ring" />
         <div className="bh-core-center">
-          <img src="/bh-logo.png" alt="BlackHole" className="bh-core-logo-img" />
+          <img src="/blockfinder-logo.svg" alt="BlockFinder" className="bh-core-logo-img" />
         </div>
         <span className="bh-core-label">SINGULARITY CORE</span>
       </div>
@@ -80,7 +80,7 @@ function CoreVisual({ pool }: { pool: PoolStats | null }) {
       <div className="bh-flow" style={{ marginTop: 20 }}>
         <span className="bh-flow-node">Bitcoin Core</span>
         <span className="bh-flow-arrow">→</span>
-        <span className="bh-flow-node" style={{ color: "var(--orange)", borderColor: "rgba(249,115,22,.3)" }}>BlackHole</span>
+        <span className="bh-flow-node" style={{ color: "var(--orange)", borderColor: "rgba(249,115,22,.3)" }}>BlockFinder</span>
         <span className="bh-flow-arrow">→</span>
         <span className="bh-flow-node">Miners</span>
         <span className="bh-flow-arrow">→</span>
@@ -704,8 +704,8 @@ function Header({ live }: { live: boolean }) {
   return (
     <header className="bh-header">
       <div className="bh-logo">
-        <img src="/bh-logo.png" alt="BlackHole" className="bh-logo-img" />
-        <div className="bh-logo-text">Black<span>Hole</span></div>
+        <img src="/blockfinder-logo.svg" alt="BlockFinder" className="bh-logo-img" />
+        <div className="bh-logo-text">Block<span>Finder</span></div>
       </div>
 
       <div className={`bh-status-badge ${live ? "bh-status-live" : "bh-status-offline"}`}>
@@ -796,7 +796,7 @@ const RING_DOTS = [
   { size:  94, speed: "7s",  dir: "reverse", w: 2, color: "rgba(34,211,238,.6)" },
 ];
 
-function BlackHoleAnim() {
+function BlockFinderAnim() {
   const SIZE = 240;
   return (
     <div style={{ width: SIZE, height: SIZE, position: "relative", flexShrink: 0 }}>
@@ -912,7 +912,7 @@ function BlockFoundOverlay({ blocksFound, onDismiss }: {
       }}>
 
         {/* Black hole animation — centered via flex parent */}
-        <BlackHoleAnim />
+        <BlockFinderAnim />
 
         <div style={{ height: 24 }} />
 
@@ -931,7 +931,7 @@ function BlockFoundOverlay({ blocksFound, onDismiss }: {
           textTransform: "uppercase", marginBottom: 8,
           textShadow: "0 0 14px rgba(249,115,22,.55)",
         }}>
-          BlackHole Pool · Block #{blocksFound}
+          BlockFinder Pool · Block #{blocksFound}
         </div>
 
         <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text2)", marginBottom: 32 }}>

@@ -527,7 +527,7 @@ impl StratumServer {
                 "mining.get_version" => {
                     let response = json!({
                         "id": request.id,
-                        "result": "BlackHole",
+                        "result": "BlockFinder",
                         "error": null
                     });
                     let _ = tx.send(response.to_string()).await;

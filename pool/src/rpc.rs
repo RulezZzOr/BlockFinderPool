@@ -57,7 +57,7 @@ mod tests {
     /// call_optional::<String> (fixed):  null result → Ok(None).
     #[test]
     fn test_submitblock_null_result_is_ok_with_call_optional() {
-        let json = r#"{"result":null,"error":null,"id":"BlackHole"}"#;
+        let json = r#"{"result":null,"error":null,"id":"BlockFinder"}"#;
         // Old behaviour: call::<Option<String>> → body.result is None → Err
         let old: anyhow::Result<Option<String>> = decode_response(json);
         assert!(old.is_err(), "call::<Option<String>> must fail on null (demonstrates the bug)");
@@ -72,7 +72,7 @@ mod tests {
     /// Both approaches should return the reason string.
     #[test]
     fn test_submitblock_rejection_reason_parsed() {
-        let json = r#"{"result":"duplicate","error":null,"id":"BlackHole"}"#;
+        let json = r#"{"result":"duplicate","error":null,"id":"BlockFinder"}"#;
         let result: anyhow::Result<Option<String>> = decode_optional(json);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), Some("duplicate".to_string()));
@@ -81,7 +81,7 @@ mod tests {
     /// submitblock with a different rejection reason.
     #[test]
     fn test_submitblock_rejected_reason() {
-        let json = r#"{"result":"rejected","error":null,"id":"BlackHole"}"#;
+        let json = r#"{"result":"rejected","error":null,"id":"BlockFinder"}"#;
         let result: anyhow::Result<Option<String>> = decode_optional(json);
         assert_eq!(result.unwrap(), Some("rejected".to_string()));
     }
@@ -89,7 +89,7 @@ mod tests {
     /// RPC error body (e.g. invalid params): returns Err regardless of approach.
     #[test]
     fn test_rpc_error_body_returns_err() {
-        let json = r#"{"result":null,"error":{"code":-25,"message":"Block not found"},"id":"BlackHole"}"#;
+        let json = r#"{"result":null,"error":{"code":-25,"message":"Block not found"},"id":"BlockFinder"}"#;
         let result: anyhow::Result<Option<String>> = decode_optional(json);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -100,7 +100,7 @@ mod tests {
     /// Successful non-null call (e.g. getblockheader) still works normally.
     #[test]
     fn test_normal_call_with_value_result() {
-        let json = r#"{"result":{"hash":"abc123"},"error":null,"id":"BlackHole"}"#;
+        let json = r#"{"result":{"hash":"abc123"},"error":null,"id":"BlockFinder"}"#;
         let result: anyhow::Result<serde_json::Value> = decode_response(json);
         assert!(result.is_ok());
         assert_eq!(result.unwrap()["hash"], "abc123");
@@ -159,7 +159,7 @@ impl RpcClient {
     ) -> anyhow::Result<Option<T>> {
         let payload = serde_json::json!({
             "jsonrpc": "1.0",
-            "id": "BlackHole",
+            "id": "BlockFinder",
             "method": method,
             "params": params,
         });
@@ -202,7 +202,7 @@ impl RpcClient {
     ) -> anyhow::Result<T> {
         let payload = json!({
             "jsonrpc": "1.0",
-            "id": "BlackHole",
+            "id": "BlockFinder",
             "method": method,
             "params": params,
         });

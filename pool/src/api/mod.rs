@@ -70,11 +70,16 @@ impl ApiServer {
             .route("/blocks", get(blocks))
             .route("/pool", get(pool))
             .route("/network", get(network))
-            .route("/blackhole/status",            get(blackhole_status))
-            .route("/blackhole/miners",            get(blackhole_miners))
-            .route("/blackhole/mempool",           get(blackhole_mempool))
-            .route("/blackhole/connection-status", get(blackhole_connection_status))
-            .route("/blackhole/template-info",     get(blackhole_template_info))
+            .route("/blockfinder/status",            get(blackhole_status))
+            .route("/blockfinder/miners",            get(blackhole_miners))
+            .route("/blockfinder/mempool",           get(blackhole_mempool))
+            .route("/blockfinder/connection-status", get(blackhole_connection_status))
+            .route("/blockfinder/template-info",     get(blackhole_template_info))
+            .route("/blackhole/status",              get(blackhole_status))
+            .route("/blackhole/miners",              get(blackhole_miners))
+            .route("/blackhole/mempool",             get(blackhole_mempool))
+            .route("/blackhole/connection-status",   get(blackhole_connection_status))
+            .route("/blackhole/template-info",       get(blackhole_template_info))
             .with_state(state)
             .layer(cors);
 
@@ -306,7 +311,7 @@ async fn network(State(state): State<ApiState>) -> impl IntoResponse {
 
 #[derive(Serialize)]
 #[allow(non_snake_case)]
-struct BlackHoleStatus {
+struct BlockFinderStatus {
     name: &'static str,
     poolIdentifier: String,
     network: String,
@@ -316,14 +321,14 @@ struct BlackHoleStatus {
     apiPort: u16,
     stratumPort: u16,
     templateRefreshIntervalMs: u64,
-    vardiff: BlackHoleVardiff,
+    vardiff: BlockFinderVardiff,
     uptime: DateTime<Utc>,
     build: BuildInfo,
 }
 
 #[derive(Serialize)]
 #[allow(non_snake_case)]
-struct BlackHoleVardiff {
+struct BlockFinderVardiff {
     targetShareTimeSec: f64,
     checkIntervalSec: f64,
     minDifficulty: f64,
@@ -343,8 +348,8 @@ async fn blackhole_status(State(state): State<ApiState>) -> impl IntoResponse {
     }
     .to_string();
 
-    Json(BlackHoleStatus {
-        name: "BlackHole",
+    Json(BlockFinderStatus {
+        name: "BlockFinder",
         poolIdentifier: state.config.pool_tag.clone(),
         network,
         internalPayoutMode: false,
@@ -353,7 +358,7 @@ async fn blackhole_status(State(state): State<ApiState>) -> impl IntoResponse {
         apiPort: state.config.api_port,
         stratumPort: state.config.stratum_port,
         templateRefreshIntervalMs: state.config.template_poll_ms,
-        vardiff: BlackHoleVardiff {
+        vardiff: BlockFinderVardiff {
             targetShareTimeSec:  state.config.target_share_time_secs,
             checkIntervalSec:    state.config.vardiff_retarget_time_secs,
             minDifficulty:       state.config.min_difficulty,
@@ -366,15 +371,15 @@ async fn blackhole_status(State(state): State<ApiState>) -> impl IntoResponse {
 
 #[derive(Serialize)]
 #[allow(non_snake_case)]
-struct BlackHoleMinerList {
+struct BlockFinderMinerList {
     address: String,
     bestDifficulty: f64,
-    workers: Vec<BlackHoleWorker>,
+    workers: Vec<BlockFinderWorker>,
 }
 
 #[derive(Serialize)]
 #[allow(non_snake_case)]
-struct BlackHoleWorker {
+struct BlockFinderWorker {
     sessionId: Option<String>,
     name: String,
     userAgent: Option<String>,
@@ -395,7 +400,7 @@ async fn blackhole_miners(State(state): State<ApiState>) -> impl IntoResponse {
     let mut workers = snapshot
         .miners
         .into_iter()
-        .map(|miner| BlackHoleWorker {
+        .map(|miner| BlockFinderWorker {
             sessionId:      miner.session_id,
             name:           miner.worker,
             userAgent:      miner.user_agent,
@@ -408,7 +413,7 @@ async fn blackhole_miners(State(state): State<ApiState>) -> impl IntoResponse {
 
     workers.sort_by(|a, b| b.hashRate.partial_cmp(&a.hashRate).unwrap_or(std::cmp::Ordering::Equal));
 
-    Json(BlackHoleMinerList {
+    Json(BlockFinderMinerList {
         address:        state.config.payout_address.clone(),
         bestDifficulty: best,
         workers,

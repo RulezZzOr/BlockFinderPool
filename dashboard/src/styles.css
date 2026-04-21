@@ -509,7 +509,7 @@ body::before {
   .bh-row2 { grid-template-columns: 1fr; }
 }
 
-/* ─── BlackHole Core ─────────────────────────────────────────────────────────── */
+/* ─── BlockFinder Core ─────────────────────────────────────────────────────── */
 .bh-core-wrap {
   position: relative;
   display: flex;

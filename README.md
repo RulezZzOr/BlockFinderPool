@@ -1,4 +1,4 @@
-# BlackHole
+# BlockFinder
 
 A self-hosted Bitcoin solo mining pool designed for Umbrel home nodes.
 Zero fee — 100% of every block reward goes directly to the miner's own address.
@@ -29,8 +29,8 @@ Zero fee — 100% of every block reward goes directly to the miner's own address
 ### Umbrel Home
 
 ```bash
-git clone https://github.com/BlackHole-Axe/BlackHolePool.git
-cd BlackHolePool
+git clone https://github.com/RulezZzOr/BlockFinderPool.git
+cd BlockFinderPool
 bash setup-blackhole.sh
 ```
 
@@ -40,8 +40,8 @@ and ZMQ settings, writes `env/.env`, builds, and starts everything.
 ### Standard Linux / macOS (any Bitcoin Core node)
 
 ```bash
-git clone https://github.com/BlackHole-Axe/BlackHolePool.git
-cd BlackHolePool
+git clone https://github.com/RulezZzOr/BlockFinderPool.git
+cd BlockFinderPool
 bash setup-blackhole.sh
 ```
 
@@ -81,8 +81,8 @@ bash setup-blackhole.sh --unattended
 ### 1. Clone the repo
 
 ```bash
-git clone https://github.com/BlackHole-Axe/BlackHolePool.git
-cd BlackHolePool
+git clone https://github.com/RulezZzOr/BlockFinderPool.git
+cd BlockFinderPool
 ```
 
 ### 2. Create your config file
@@ -234,7 +234,7 @@ To wipe all share/block data and restart clean:
 bash reset-pool.sh
 ```
 
-> Run this from the `BlackHole` directory. You may need `sudo` depending on Docker
+> Run this from the `BlockFinder` directory. You may need `sudo` depending on Docker
 > volume permissions.
 
 ---
@@ -264,7 +264,7 @@ Bitcoin Core is not reachable. Check:
 ## Project structure
 
 ```
-BlackHole/
+BlockFinder/
 ├── docker-compose.yml        — Compose service definitions
 ├── env/
 │   ├── .env                  — Your config (gitignored)
@@ -363,17 +363,17 @@ The REST API is available on **port 8081** (host-mapped from container port 8080
 | `GET /health` | Health check `{"ok":true}` |
 | `GET /pool` | Full pool stats (hashrate, miners, blocks, counters) |
 | `GET /miners` | Per-worker stats (hashrate, shares, best diff, RTT) |
-| `GET /blackhole/miners` | Enriched miner list with firmware, session info |
-| `GET /blackhole/connection-status` | RPC + ZMQ + Stratum live connectivity |
-| `GET /blackhole/template-info` | Current block template (height, txs, target) |
-| `GET /blackhole/mempool` | Live mempool info from Bitcoin Core |
+| `GET /blockfinder/miners` | Enriched miner list with firmware, session info |
+| `GET /blockfinder/connection-status` | RPC + ZMQ + Stratum live connectivity |
+| `GET /blockfinder/template-info` | Current block template (height, txs, target) |
+| `GET /blockfinder/mempool` | Live mempool info from Bitcoin Core |
 | `GET /blocks` | Found blocks history |
 | `GET /build-info` | Build provenance (git SHA, timestamp, image ID) |
 
 Quick check:
 ```bash
 curl http://localhost:8081/pool | python3 -m json.tool
-curl http://localhost:8081/blackhole/connection-status | python3 -m json.tool
+curl http://localhost:8081/blockfinder/connection-status | python3 -m json.tool
 ```
 
 ---
@@ -391,10 +391,10 @@ docker ps --filter "name=blackhole"
 curl -s http://localhost:8081/pool | python3 -m json.tool
 
 # Miner list
-curl -s http://localhost:8081/blackhole/miners | python3 -m json.tool
+curl -s http://localhost:8081/blockfinder/miners | python3 -m json.tool
 
 # Connection status (RPC + ZMQ + Stratum)
-curl -s http://localhost:8081/blackhole/connection-status | python3 -m json.tool
+curl -s http://localhost:8081/blockfinder/connection-status | python3 -m json.tool
 
 # Check for errors in logs
 docker logs blackhole-blackhole-pool-1 2>&1 | grep -E "ERROR|WARN|BLOCK"

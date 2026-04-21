@@ -151,7 +151,7 @@ export const fetchPool = (): Promise<PoolStats> => apiGet<PoolStats>("/pool");
 
 export const fetchTemplateInfo = async (): Promise<TemplateInfo | null> => {
   try {
-    return await apiGet<TemplateInfo>("/blackhole/template-info");
+    return await apiGet<TemplateInfo>("/blockfinder/template-info");
   } catch {
     return null;
   }
