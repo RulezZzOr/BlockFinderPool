@@ -333,11 +333,10 @@ if [ -n "$BTC_CONTAINER" ]; then
 
 else
   # ── No Docker container: look for native bitcoind ────────────────────────
-  # IMPORTANT: pool runs in Docker → can't reach host's 127.0.0.1 directly.
-  # Use the Docker bridge gateway (host gateway) so the pool container can
-  # reach services running on the host machine.
-  #   Linux:  Docker bridge gateway = 172.17.0.1  (or ip route default)
-  #   macOS:  host.docker.internal  (Docker Desktop resolves this)
+  # In standalone mode the pool uses host networking, so a native bitcoind on
+  # the same machine is reachable directly on localhost.
+  # Keep the gateway helper only as a fallback for environments that do not
+  # share the host network namespace.
   _host_gw() {
     if [ "$(uname -s)" = "Darwin" ]; then
       echo "host.docker.internal"
@@ -372,10 +371,19 @@ else
       "/usr/local/var/bitcoin"; do
     if [ -f "$dir/bitcoin.conf" ]; then
       BTC_CONF="$dir/bitcoin.conf"
-      # Use host gateway so pool Docker container can reach native bitcoind
-      BTC_IP=$(_first_line "$(_host_gw)")
-      ok "Found native bitcoin.conf: $BTC_CONF"
-      ok "  Host gateway: ${BLD}$BTC_IP${RST}  (reachable from pool container)"
+      if [ "$PLATFORM" = "standalone" ]; then
+        if [ "$(uname -s)" = "Darwin" ]; then
+          BTC_IP="host.docker.internal"
+        else
+          BTC_IP="127.0.0.1"
+        fi
+        ok "Found native bitcoin.conf: $BTC_CONF"
+        ok "  Native node target: ${BLD}$BTC_IP${RST}  (standalone uses host networking)"
+      else
+        BTC_IP=$(_first_line "$(_host_gw)")
+        ok "Found native bitcoin.conf: $BTC_CONF"
+        ok "  Host gateway: ${BLD}$BTC_IP${RST}  (reachable from pool container)"
+      fi
       # Parse conf
       while IFS='=' read -r k v; do
         k=$(echo "$k" | sed 's/#.*//;s/[[:space:]]//g'); v=$(echo "$v" | sed 's/#.*//;s/[[:space:]\r]//g')
@@ -388,9 +396,9 @@ else
           regtest)        [ "$v" = "1" ] && BTC_NETWORK="regtest" ;;
           signet)         [ "$v" = "1" ] && BTC_NETWORK="signet" ;;
           zmqpubhashblock) ZMQ_BLOCKS_URL="${v//0.0.0.0/$BTC_IP}" ;;
-          zmqpubrawblock)  [ -z "$ZMQ_BLOCKS_URL" ] && ZMQ_BLOCKS_URL="${v//0.0.0.0/$BTC_IP}" ;;
+          zmqpubrawblock)  ZMQ_BLOCKS_URL2="${v//0.0.0.0/$BTC_IP}" ;;
           zmqpubhashtx)    ZMQ_TXS_URL="${v//0.0.0.0/$BTC_IP}" ;;
-          zmqpubrawtx)     [ -z "$ZMQ_TXS_URL" ] && ZMQ_TXS_URL="${v//0.0.0.0/$BTC_IP}" ;;
+          zmqpubrawtx)     ZMQ_TXS_URL2="${v//0.0.0.0/$BTC_IP}" ;;
         esac
       done < "$BTC_CONF"
       break
@@ -416,9 +424,6 @@ fi
 # ── Build ZMQ URLs AFTER we have BTC_IP (including user input above) ─────────
 [ -z "$ZMQ_BLOCKS_URL" ] && ZMQ_BLOCKS_URL="tcp://${BTC_IP}:${ZMQ_BLOCK_PORT}"
 [ -z "$ZMQ_TXS_URL"    ] && ZMQ_TXS_URL="tcp://${BTC_IP}:${ZMQ_TX_PORT}"
-# Secondary ZMQ endpoints (rawblock / rawtx)
-ZMQ_BLOCKS_URL2="${ZMQ_BLOCKS_URL2:-tcp://${BTC_IP}:${ZMQ_RAWBLOCK_PORT:-28332}}"
-ZMQ_TXS_URL2="${ZMQ_TXS_URL2:-tcp://${BTC_IP}:${ZMQ_RAWTX_PORT:-28333}}"
 
 RPC_URL="http://${BTC_IP}:${BTC_PORT}"
 echo ""
@@ -554,8 +559,8 @@ RPC_PASS=${BTC_PASS}
 
 # ── ZMQ (low-latency block/tx notifications) ─────────────────────────────────
 # Both hashblock+rawblock endpoints for maximum reliability (dual ZMQ)
-ZMQ_BLOCKS=${ZMQ_BLOCKS_URL},${ZMQ_BLOCKS_URL2}
-ZMQ_TXS=${ZMQ_TXS_URL},${ZMQ_TXS_URL2}
+ZMQ_BLOCKS=${ZMQ_BLOCKS_URL}${ZMQ_BLOCKS_URL2:+,${ZMQ_BLOCKS_URL2}}
+ZMQ_TXS=${ZMQ_TXS_URL}${ZMQ_TXS_URL2:+,${ZMQ_TXS_URL2}}
 
 # ── Network ──────────────────────────────────────────────────────────────────
 BITCOIN_NETWORK=${BTC_NETWORK}
