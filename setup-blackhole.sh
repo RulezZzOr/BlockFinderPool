@@ -132,6 +132,7 @@ if [ -f "/home/umbrel/umbrel/umbrel.yaml" ] || \
   ok "Platform: Umbrel Home"
 else
   ok "Platform: Standalone (Linux/macOS)"
+  COMPOSE_FILES=(-f docker-compose.standalone.yml)
 fi
 
 # ════════════════════════════════════════════════════════════════════════════
