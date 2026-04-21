@@ -256,7 +256,7 @@ async fn public_blocks() -> impl IntoResponse {
     };
 
     let blocks = match client
-        .get(format!("https://mempool.space/api/blocks/{tip_height}"))
+        .get(format!("https://mempool.space/api/v1/blocks/{tip_height}"))
         .send()
         .await
         .and_then(|r| r.error_for_status())

@@ -224,7 +224,7 @@ export const fetchPublicBlocks = async (): Promise<PublicBlockRow[]> => {
     } catch {}
 
     const tipHeight = Number(await fetchJson<unknown>(mempoolUrl("/blocks/tip/height")));
-    const blocks = await fetchJson<MempoolBlock[]>(mempoolUrl(`/blocks/${tipHeight}`));
+    const blocks = await fetchJson<MempoolBlock[]>(mempoolUrl(`/v1/blocks/${tipHeight}`));
     return (blocks || []).slice(0, 10).map((block) => {
       const hash = block.id ?? block.hash ?? "";
       const pool =
