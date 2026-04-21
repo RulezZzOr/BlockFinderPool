@@ -581,11 +581,11 @@ PERSIST_SHARES=false
 
 # ── Vardiff ────────────────────────────────────────────────────────────────────
 VARDIFF_ENABLED=true
-TARGET_SHARE_TIME_SECS=10
-VARDIFF_RETARGET_SECS=30
-MIN_DIFFICULTY=512
-MAX_DIFFICULTY=33554432
-STRATUM_START_DIFFICULTY=1024
+TARGET_SHARE_TIME_SECS=20
+VARDIFF_RETARGET_SECS=45
+MIN_DIFFICULTY=8192
+MAX_DIFFICULTY=262144
+STRATUM_START_DIFFICULTY=32768
 
 # ── Job timing (optimised — see .env.example for tuning guide) ───────────────
 # Wire-measured optimal values for Umbrel Home / low-power hardware:
