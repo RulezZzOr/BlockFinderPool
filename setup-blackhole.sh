@@ -686,15 +686,21 @@ HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 [ -z "$HOST_IP" ] && HOST_IP=$(ifconfig 2>/dev/null \
   | awk '/inet /{if($2!="127.0.0.1"){print $2;exit}}')
 HOST_IP="${HOST_IP:-localhost}"
-API="http://localhost:8081"
+if [ "$PLATFORM" = "umbrel" ]; then
+  API="http://localhost:8081"
+  API_HOST_PORT=8081
+else
+  API="http://localhost:8080"
+  API_HOST_PORT=8080
+fi
 
 info "Waiting for pool API to become ready…"
-for i in $(seq 1 24); do
+for i in $(seq 1 120); do
   if curl -sf --max-time 3 "$API/health" &>/dev/null; then
     ok "API healthy (${i}×2s = $((i*2))s)"
     break
   fi
-  [ "$i" -eq 24 ] && { err "Pool API did not respond within 48s."; }
+  [ "$i" -eq 120 ] && { err "Pool API did not respond within 240s."; }
   sleep 2
 done
 
@@ -761,7 +767,7 @@ echo ""
 echo -e "${BLD}${GRN}  ✓ BlockFinder Pool is running!${RST}"
 echo ""
 echo -e "  ${BLD}Dashboard${RST}  →  http://${HOST_IP}:3334"
-echo -e "  ${BLD}API${RST}        →  http://${HOST_IP}:8081/pool"
+echo -e "  ${BLD}API${RST}        →  http://${HOST_IP}:${API_HOST_PORT}/pool"
 echo -e "  ${BLD}Stratum${RST}    →  ${HOST_IP}:3333"
 echo ""
 echo -e "  ${DIM}Configure your miner:${RST}"

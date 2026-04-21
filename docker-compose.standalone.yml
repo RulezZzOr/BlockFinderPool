@@ -19,8 +19,8 @@ services:
       test: ["CMD-SHELL", "grep -q ':1F90 ' /proc/net/tcp || grep -q ':1F90 ' /proc/net/tcp6"]
       interval: 30s
       timeout: 3s
-      retries: 3
-      start_period: 15s
+      retries: 6
+      start_period: 240s
     volumes:
       - pool_data:/data
 
