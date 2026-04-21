@@ -28,22 +28,37 @@ fi
 # attach to an Umbrel-only external network.
 MODE="${BLACKHOLE_COMPOSE_MODE:-auto}"
 if [ "$MODE" = "umbrel" ]; then
-  COMPOSE_FILES="-f docker-compose.yml"
+  COMPOSE_FILES=(-f docker-compose.yml)
 elif [ "$MODE" = "standalone" ]; then
-  COMPOSE_FILES="-f docker-compose.standalone.yml"
+  COMPOSE_FILES=(-f docker-compose.standalone.yml)
 elif docker network inspect umbrel_main_network >/dev/null 2>&1; then
-  COMPOSE_FILES="-f docker-compose.yml"
+  COMPOSE_FILES=(-f docker-compose.yml)
 else
-  COMPOSE_FILES="-f docker-compose.standalone.yml"
+  COMPOSE_FILES=(-f docker-compose.standalone.yml)
 fi
 
+PROJECT_NAME="$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')"
+COMPOSE_PROJECT_ARGS=(-p "$PROJECT_NAME")
+
 echo "[1/2] Building BlockFinder…"
-# shellcheck disable=SC2086
-sudo -E "${DC[@]}" $COMPOSE_FILES build
+sudo -E "${DC[@]}" "${COMPOSE_PROJECT_ARGS[@]}" "${COMPOSE_FILES[@]}" build
+
+EXISTING_CONTAINERS=$(
+  {
+    docker ps -aq \
+      --filter "label=com.docker.compose.project=${PROJECT_NAME}" \
+      2>/dev/null || true
+    docker ps -aq \
+      --filter "name=${PROJECT_NAME}_" \
+      2>/dev/null || true
+  } | awk 'NF && !seen[$0]++'
+)
+if [ -n "$EXISTING_CONTAINERS" ]; then
+  echo "$EXISTING_CONTAINERS" | xargs -r docker rm -f >/dev/null 2>&1 || true
+fi
 
 echo "[2/2] Starting services…"
-# shellcheck disable=SC2086
-sudo -E "${DC[@]}" $COMPOSE_FILES up -d
+sudo -E "${DC[@]}" "${COMPOSE_PROJECT_ARGS[@]}" "${COMPOSE_FILES[@]}" up -d --remove-orphans
 
 echo ""
 echo "Status:"
@@ -54,5 +69,10 @@ sudo docker ps --filter "name=blackhole" \
 echo ""
 HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost)
 echo "  Dashboard : http://${HOST_IP}:3334"
-echo "  API       : http://${HOST_IP}:8081/pool"
+if [ "$MODE" = "umbrel" ] || { [ "$MODE" = "auto" ] && docker network inspect umbrel_main_network >/dev/null 2>&1; }; then
+  API_PORT=8081
+else
+  API_PORT=8080
+fi
+echo "  API       : http://${HOST_IP}:${API_PORT}/pool"
 echo "  Stratum   : ${HOST_IP}:3333"

@@ -527,6 +527,9 @@ fi
 
 ok "Payout address: ${BLD}$PAYOUT_ADDR${RST}"
 
+PROJECT_NAME="$(basename "$SCRIPT_DIR" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')"
+COMPOSE_PROJECT_ARGS=(-p "$PROJECT_NAME")
+
 # ════════════════════════════════════════════════════════════════════════════
 # PHASE 7 — Generate env/.env
 # ════════════════════════════════════════════════════════════════════════════
@@ -664,10 +667,10 @@ BUILD_ARGS=(
 )
 
 info "Building pool image (this may take a few minutes on first run)…"
-env "${BUILD_ARGS[@]}" "${DC[@]}" "${COMPOSE_FILES[@]}" build blackhole-pool 2>&1
+env "${BUILD_ARGS[@]}" "${DC[@]}" "${COMPOSE_PROJECT_ARGS[@]}" "${COMPOSE_FILES[@]}" build blackhole-pool 2>&1
 
 info "Building dashboard image…"
-env "${BUILD_ARGS[@]}" "${DC[@]}" "${COMPOSE_FILES[@]}" build blackhole-dashboard 2>&1
+env "${BUILD_ARGS[@]}" "${DC[@]}" "${COMPOSE_PROJECT_ARGS[@]}" "${COMPOSE_FILES[@]}" build blackhole-dashboard 2>&1
 
 ok "Build complete"
 
@@ -676,17 +679,21 @@ ok "Build complete"
 # ════════════════════════════════════════════════════════════════════════════
 sep; info "Phase 10 — Starting BlockFinder"
 
-IMAGE_ID=$(docker image inspect blackhole-blackhole-pool:latest \
+IMAGE_ID=$(docker image inspect "${PROJECT_NAME}_blackhole-pool:latest" \
   --format '{{.Id}}' 2>/dev/null || echo unknown)
 
-PROJECT_NAME="$(basename "$SCRIPT_DIR" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')"
 # Docker Compose v1 can get stuck trying to recreate old containers whose
 # metadata no longer matches the rebuilt image. Remove every container that
 # still belongs to this project before bringing services back up.
 EXISTING_CONTAINERS=$(
-  docker ps -aq \
-    --filter "label=com.docker.compose.project=${PROJECT_NAME}" \
-    2>/dev/null || true
+  {
+    docker ps -aq \
+      --filter "label=com.docker.compose.project=${PROJECT_NAME}" \
+      2>/dev/null || true
+    docker ps -aq \
+      --filter "name=${PROJECT_NAME}_" \
+      2>/dev/null || true
+  } | awk 'NF && !seen[$0]++'
 )
 if [ -n "$EXISTING_CONTAINERS" ]; then
   echo "$EXISTING_CONTAINERS" | xargs -r docker rm -f >/dev/null 2>&1 || true
@@ -695,9 +702,9 @@ fi
 ( export BUILD_GIT_SHA="$BUILD_SHA" BUILD_GIT_DIRTY="$BUILD_DIRTY" \
          BUILD_SOURCE="setup-blackhole.sh" BUILD_TIME_UTC="$BUILD_TIME" \
          RUNTIME_IMAGE_ID="$IMAGE_ID" \
-         RUNTIME_IMAGE_REF="blackhole-blackhole-pool:latest" \
-         RUNTIME_CONTAINER_NAME="blackhole-blackhole-pool-1"; \
-  "${DC[@]}" "${COMPOSE_FILES[@]}" up -d --remove-orphans )
+         RUNTIME_IMAGE_REF="${PROJECT_NAME}_blackhole-pool:latest" \
+         RUNTIME_CONTAINER_NAME="${PROJECT_NAME}_blackhole-pool_1"; \
+  "${DC[@]}" "${COMPOSE_PROJECT_ARGS[@]}" "${COMPOSE_FILES[@]}" up -d --remove-orphans )
 
 ok "Containers started"
 
