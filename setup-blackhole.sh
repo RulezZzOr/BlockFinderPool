@@ -343,11 +343,25 @@ else
       echo "host.docker.internal"
     else
       # Get default gateway IP — reachable from any Docker container
-      ip route 2>/dev/null | awk '/^default/{print $3;exit}' \
-        || docker network inspect bridge \
+      local gw
+      gw=$(ip route show default 2>/dev/null | awk 'NR==1 { print $3; exit }' | tr -d '\r' | head -1 || true)
+      if [ -n "$gw" ]; then
+        echo "$gw"
+        return 0
+      fi
+      gw=$(docker network inspect bridge \
              --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null \
-        || echo "172.17.0.1"
+             | tr -d '\r' | awk 'NF { print; exit }' || true)
+      if [ -n "$gw" ]; then
+        echo "$gw"
+        return 0
+      fi
+      echo "172.17.0.1"
     fi
+  }
+
+  _first_line() {
+    printf '%s\n' "$1" | tr -d '\r' | awk 'NF { print; exit }'
   }
 
   for dir in \
@@ -359,7 +373,7 @@ else
     if [ -f "$dir/bitcoin.conf" ]; then
       BTC_CONF="$dir/bitcoin.conf"
       # Use host gateway so pool Docker container can reach native bitcoind
-      BTC_IP=$(_host_gw)
+      BTC_IP=$(_first_line "$(_host_gw)")
       ok "Found native bitcoin.conf: $BTC_CONF"
       ok "  Host gateway: ${BLD}$BTC_IP${RST}  (reachable from pool container)"
       # Parse conf
@@ -373,10 +387,10 @@ else
           testnet)        [ "$v" = "1" ] && BTC_NETWORK="testnet" ;;
           regtest)        [ "$v" = "1" ] && BTC_NETWORK="regtest" ;;
           signet)         [ "$v" = "1" ] && BTC_NETWORK="signet" ;;
-          zmqpubhashblock) ZMQ_BLOCKS_URL=$(echo "$v" | sed "s|0\.0\.0\.0|$BTC_IP|g") ;;
-          zmqpubrawblock)  [ -z "$ZMQ_BLOCKS_URL" ] && ZMQ_BLOCKS_URL=$(echo "$v" | sed "s|0\.0\.0\.0|$BTC_IP|g") ;;
-          zmqpubhashtx)    ZMQ_TXS_URL=$(echo "$v" | sed "s|0\.0\.0\.0|$BTC_IP|g") ;;
-          zmqpubrawtx)     [ -z "$ZMQ_TXS_URL" ] && ZMQ_TXS_URL=$(echo "$v" | sed "s|0\.0\.0\.0|$BTC_IP|g") ;;
+          zmqpubhashblock) ZMQ_BLOCKS_URL="${v//0.0.0.0/$BTC_IP}" ;;
+          zmqpubrawblock)  [ -z "$ZMQ_BLOCKS_URL" ] && ZMQ_BLOCKS_URL="${v//0.0.0.0/$BTC_IP}" ;;
+          zmqpubhashtx)    ZMQ_TXS_URL="${v//0.0.0.0/$BTC_IP}" ;;
+          zmqpubrawtx)     [ -z "$ZMQ_TXS_URL" ] && ZMQ_TXS_URL="${v//0.0.0.0/$BTC_IP}" ;;
         esac
       done < "$BTC_CONF"
       break
