@@ -324,6 +324,59 @@ body::before {
   border-color: rgba(34,211,238,.16);
 }
 
+.bh-public-blocks-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.bh-public-block-card {
+  min-width: 0;
+  padding: 12px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(34,211,238,.14);
+  background:
+    linear-gradient(180deg, rgba(12,18,36,.96) 0%, rgba(8,13,24,.98) 100%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.02);
+}
+
+.bh-public-block-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.bh-public-block-age {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .04em;
+  color: var(--text3);
+  white-space: nowrap;
+}
+
+.bh-public-block-pool {
+  margin-top: 10px;
+  font-family: var(--font-head);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--cyan);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bh-public-block-hash {
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text2);
+  word-break: break-all;
+  line-height: 1.45;
+}
+
 .bh-block-feed-row-public {
   grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
 }
@@ -458,6 +511,10 @@ body::before {
 
 @media (max-width: 720px) {
   .bh-top-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .bh-public-blocks-grid {
     grid-template-columns: 1fr;
   }
 

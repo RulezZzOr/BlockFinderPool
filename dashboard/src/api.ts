@@ -121,6 +121,11 @@ function getBases(): string[] {
   return ["/api"];
 }
 
+function getDirectFallbackBases(): string[] {
+  const hostname = typeof window !== "undefined" ? window.location.hostname : "localhost";
+  return [`http://${hostname}:8080`, `http://${hostname}:8081`];
+}
+
 async function apiGet<T>(path: string): Promise<T> {
   const bases = getBases();
   for (const base of bases) {
@@ -128,8 +133,12 @@ async function apiGet<T>(path: string): Promise<T> {
       return await fetchJson<T>(apiUrl(base, path));
     } catch {}
   }
-  const hostname = typeof window !== "undefined" ? window.location.hostname : "localhost";
-  return fetchJson<T>(apiUrl(`http://${hostname}:8081`, path));
+  for (const base of getDirectFallbackBases()) {
+    try {
+      return await fetchJson<T>(apiUrl(base, path));
+    } catch {}
+  }
+  throw new Error(`API unavailable for ${path}`);
 }
 
 async function apiGetAll<T>(path: string): Promise<T[]> {
@@ -141,8 +150,12 @@ async function apiGetAll<T>(path: string): Promise<T[]> {
     .filter((r): r is PromiseFulfilledResult<T> => r.status === "fulfilled")
     .map((r) => r.value);
   if (ok.length > 0) return ok;
-  const hostname = typeof window !== "undefined" ? window.location.hostname : "localhost";
-  return [await fetchJson<T>(apiUrl(`http://${hostname}:8081`, path))];
+  for (const base of getDirectFallbackBases()) {
+    try {
+      return [await fetchJson<T>(apiUrl(base, path))];
+    } catch {}
+  }
+  throw new Error(`API unavailable for ${path}`);
 }
 
 // ─── API fetch functions ───────────────────────────────────────────────────────
