@@ -729,12 +729,27 @@ else
 fi
 
 info "Waiting for pool API to become ready…"
+API_READY=false
 for i in $(seq 1 120); do
   if curl -sf --max-time 3 "$API/health" &>/dev/null; then
     ok "API healthy (${i}×2s = $((i*2))s)"
+    API_READY=true
     break
   fi
-  [ "$i" -eq 120 ] && { err "Pool API did not respond within 240s."; }
+  if [ "$i" -eq 120 ]; then
+    err "Pool API did not respond within 240s."
+    POOL_CONTAINER=$(
+      docker ps -a \
+        --filter "label=com.docker.compose.project=${PROJECT_NAME}" \
+        --filter "label=com.docker.compose.service=blackhole-pool" \
+        --format '{{.Names}}' 2>/dev/null | head -1
+    )
+    if [ -n "$POOL_CONTAINER" ]; then
+      echo ""
+      echo -e "${BLD}Last pool logs:${RST}"
+      docker logs --tail=80 "$POOL_CONTAINER" 2>&1 || true
+    fi
+  fi
   sleep 2
 done
 
