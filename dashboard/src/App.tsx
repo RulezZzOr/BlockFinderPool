@@ -1,13 +1,18 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import {
-  PoolStats, Miner, NetworkInfo, BlockRow,
+  PoolStats, Miner, NetworkInfo, BlockRow, PublicBlockRow,
   fetchPool, fetchMiners,
+  fetchBlocks,
+  fetchPublicBlocks,
   fmtHr, fmtDiff, fmtNetHash, fmtUptime, fmtBlockInterval, timeAgo, shortWorker, shortAddress, getFirmwareLabel,
   blockSubsidy, fmtBtc,
 } from "./api";
+import BlocksTable from "./components/BlocksTable";
+import PublicBlocksTable from "./components/PublicBlocksTable";
 import "./styles.css";
 
 const REFRESH_MS = 5000;
+const PUBLIC_REFRESH_MS = 30000;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -950,6 +955,8 @@ function BlockFoundOverlay({ blocksFound, onDismiss }: {
 export default function App() {
   const [pool, setPool] = useState<PoolStats | null>(null);
   const [miners, setMiners] = useState<Miner[]>([]);
+  const [blocks, setBlocks] = useState<BlockRow[]>([]);
+  const [publicBlocks, setPublicBlocks] = useState<PublicBlockRow[]>([]);
   const [network, setNetwork] = useState<NetworkInfo | null>(null);
   const [live, setLive] = useState(false);
   const [celebrating, setCelebrating] = useState(false);
@@ -973,9 +980,10 @@ export default function App() {
       // getmininginfo RPC.
       // [Fix 3] Use allSettled so a flaky /miners response does NOT flip
       // the dashboard OFFLINE; pool health drives the LIVE indicator.
-      const [poolResult, minersResult] = await Promise.allSettled([
+      const [poolResult, minersResult, blocksResult] = await Promise.allSettled([
         fetchPool(),
         fetchMiners(),
+        fetchBlocks(),
       ]);
 
       if (poolResult.status === "fulfilled") {
@@ -1016,6 +1024,10 @@ export default function App() {
       if (minersResult.status === "fulfilled") {
         setMiners(minersResult.value);
       }
+
+      if (blocksResult.status === "fulfilled") {
+        setBlocks(blocksResult.value);
+      }
     } finally {
       // [Fix 2] Always release the guard, even on errors.
       loadingRef.current = false;
@@ -1028,6 +1040,20 @@ export default function App() {
     return () => clearInterval(t);
   }, [load]);
 
+  useEffect(() => {
+    let alive = true;
+    const loadPublic = async () => {
+      const rows = await fetchPublicBlocks();
+      if (alive) setPublicBlocks(rows);
+    };
+    loadPublic();
+    const t = setInterval(loadPublic, PUBLIC_REFRESH_MS);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, []);
+
   return (
     <div className="bh-app">
       {celebrating && (
@@ -1039,6 +1065,10 @@ export default function App() {
 
       <Header live={live} />
       <NetworkBar pool={pool} network={network} />
+      <div className="bh-top-grid">
+        <BlocksTable blocks={blocks} />
+        <PublicBlocksTable blocks={publicBlocks} />
+      </div>
 
       {/* Row 1: Bitcoin Core | Core Visual | Share Flow */}
       <div className="bh-section-title" id="bh-core">

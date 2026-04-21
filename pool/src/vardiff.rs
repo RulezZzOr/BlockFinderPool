@@ -8,10 +8,12 @@ use chrono::{DateTime, Utc};
 //   0.25 means ~4 retarget periods to converge fully.
 const EMA_ALPHA: f64 = 0.25;
 
-// HYSTERESIS: require target to differ from current by this factor before retarget.
-//   1.5 means: only retarget if target ≥ current×1.5 (up) or ≤ current/1.5 (down).
-//   Prevents oscillation at power-of-2 boundaries and eliminates boundary-stuck.
-const HYSTERESIS: f64 = 1.5;
+// Hysteresis bands:
+//   UP   = 1.35 → only raise diff when the target is meaningfully higher.
+//   DOWN = 1.15 → lower diff more eagerly so miners don't get stuck high.
+// This is intentionally asymmetric: we prefer slow rises and faster falls.
+const HYSTERESIS_UP: f64 = 1.35;
+const HYSTERESIS_DOWN: f64 = 1.15;
 
 // OFFLINE_SECS: if zero shares in this many seconds → cut difficulty by 6.
 //   Only fires when truly offline, not from statistical variance.
@@ -32,11 +34,12 @@ const CACHE_SIZE: usize = 30;
 ///
 /// 3. Target difficulty = ema_rate × target_share_time
 ///
-/// 4. Round to nearest power-of-2.
+/// 4. Keep the exact target difficulty, rounded to a whole number and
+///    clamped to the configured min/max bounds.
 ///
 /// 5. Retarget only when:
-///      UP:   target ≥ current × HYSTERESIS  (prevents boundary-stuck going up)
-///      DOWN: target ≤ current / HYSTERESIS  (prevents boundary-stuck going down)
+///      UP:   target ≥ current × HYSTERESIS_UP   (slow upward movement)
+///      DOWN: target ≤ current / HYSTERESIS_DOWN (faster downward movement)
 ///
 /// 6. ÷6 rescue rule: if zero shares for OFFLINE_SECS → miner is truly stopped.
 ///
@@ -51,6 +54,10 @@ pub struct VardiffController {
     retarget_time:     f64,
     min_diff:          f64,
     max_diff:          f64,
+    /// Time window used for share-rate estimation. Old shares are pruned so
+    /// the controller can react to sustained slowdowns instead of waiting for
+    /// an oversized historical burst to dominate the rate estimate.
+    sample_window_secs: f64,
 
     last_retarget: DateTime<Utc>,
     session_start: DateTime<Utc>,
@@ -60,6 +67,10 @@ pub struct VardiffController {
     ema_rate: f64,
     /// Whether ema_rate has been seeded from at least one measurement.
     ema_seeded: bool,
+
+    /// Timestamp of the most recent accepted share. Used together with the
+    /// time-based sample window to keep downward retargets responsive.
+    last_share_at: Option<DateTime<Utc>>,
 
     /// Sliding ring-buffer of (time, difficulty) for instant-rate estimation.
     samples: VecDeque<(DateTime<Utc>, f64)>,
@@ -73,15 +84,18 @@ impl VardiffController {
         max_diff:          f64,
     ) -> Self {
         let now = Utc::now();
+        let sample_window_secs = (target_share_time.max(1.0) * 4.0).clamp(90.0, 300.0);
         Self {
             target_share_time: target_share_time.max(1.0),
             retarget_time:     retarget_time.max(1.0),
             min_diff:          min_diff.max(1.0),
             max_diff:          max_diff.max(min_diff),
+            sample_window_secs,
             last_retarget:     now,
             session_start:     now,
             ema_rate:          0.0,
             ema_seeded:        false,
+            last_share_at:     None,
             samples:           VecDeque::with_capacity(CACHE_SIZE),
         }
     }
@@ -89,6 +103,8 @@ impl VardiffController {
     /// Record an accepted share.
     pub fn record_share(&mut self, now: DateTime<Utc>, difficulty: f64) {
         self.samples.push_back((now, difficulty));
+        self.last_share_at = Some(now);
+        self.prune_old_samples(now);
         if self.samples.len() > CACHE_SIZE {
             self.samples.pop_front();
         }
@@ -100,13 +116,14 @@ impl VardiffController {
         let since_ms = (now - self.last_retarget).num_milliseconds();
         if since_ms < (self.retarget_time * 1000.0) as i64 { return None; }
         self.last_retarget = now;
+        self.prune_old_samples(now);
 
         // ── Offline rescue ────────────────────────────────────────────────────
         // Zero shares for OFFLINE_SECS → miner truly stopped. Cut difficulty.
         if self.samples.is_empty() {
             let age_s = (now - self.session_start).num_seconds() as f64;
             if age_s > OFFLINE_SECS {
-                let stepped = self.nearest_p2((current_diff / 6.0).max(self.min_diff));
+                let stepped = self.clamp_diff((current_diff / 6.0).max(self.min_diff));
                 if (stepped - current_diff).abs() > f64::EPSILON {
                     return Some(stepped);
                 }
@@ -131,14 +148,15 @@ impl VardiffController {
 
         // ── Target difficulty ─────────────────────────────────────────────────
         let raw_target  = self.ema_rate * self.target_share_time;
-        let target_diff = self.nearest_p2(raw_target.clamp(self.min_diff, self.max_diff));
+        let target_diff = self.clamp_diff(raw_target);
 
         // ── Hysteresis dead-band ──────────────────────────────────────────────
-        // Retarget UP   if target ≥ current × HYSTERESIS
-        // Retarget DOWN if target ≤ current / HYSTERESIS
-        // This eliminates both oscillation and boundary-stuck at exact P2 values.
-        let should_up   = target_diff >= current_diff * HYSTERESIS;
-        let should_down = target_diff <= current_diff / HYSTERESIS;
+        // Retarget UP   if target ≥ current × HYSTERESIS_UP
+        // Retarget DOWN if target ≤ current / HYSTERESIS_DOWN
+        // Asymmetric on purpose: let fast miners climb a bit more slowly,
+        // but let slow miners come down quickly.
+        let should_up   = target_diff >= current_diff * HYSTERESIS_UP;
+        let should_down = target_diff <= current_diff / HYSTERESIS_DOWN;
 
         if should_up || should_down {
             Some(target_diff)
@@ -147,18 +165,25 @@ impl VardiffController {
         }
     }
 
-    /// Round to nearest power of 2, clamped to [min_diff, max_diff].
-    pub fn nearest_p2(&self, val: f64) -> f64 {
+    /// Clamp difficulty to the configured range and round to a whole number.
+    ///
+    /// ckpool keeps exact integer difficulty steps rather than snapping to
+    /// powers of two.  Matching that behaviour lets the pool move down
+    /// smoothly instead of getting stuck on coarse buckets like 131072 / 262144.
+    pub fn clamp_diff(&self, val: f64) -> f64 {
         if !val.is_finite() || val <= 0.0 { return self.min_diff; }
-        let c = val.clamp(self.min_diff, self.max_diff);
-        let n = c as u64;
-        if n == 0 { return self.min_diff; }
-        let bits  = u64::BITS - n.leading_zeros() - 1;
-        let lower = 1u64 << bits;
-        let upper = lower << 1;
-        let res = if (c - lower as f64) <= (upper as f64 - c) { lower as f64 }
-                  else                                          { upper as f64 };
-        res.clamp(self.min_diff, self.max_diff)
+        val.round().clamp(self.min_diff, self.max_diff)
+    }
+
+    /// Drop samples that fall outside the rolling time window.
+    fn prune_old_samples(&mut self, now: DateTime<Utc>) {
+        while let Some((front_time, _)) = self.samples.front().cloned() {
+            let age_s = (now - front_time).num_seconds() as f64;
+            if age_s <= self.sample_window_secs {
+                break;
+            }
+            self.samples.pop_front();
+        }
     }
 }
 
@@ -202,8 +227,8 @@ mod tests {
         let r = vc.maybe_retarget(16384.0, future);
         assert!(r.is_some());
         let new_d = r.unwrap();
-        // 16384 / 6 = 2730 → nearest P2 = 2048
-        assert_eq!(new_d, 2048.0);
+        // 16384 / 6 = 2730.666..., rounded to the nearest integer.
+        assert_eq!(new_d, 2731.0);
     }
 
     /// Fast miner: 10× too fast → difficulty should increase.
@@ -214,7 +239,7 @@ mod tests {
         add_shares(&mut vc, 30, 16384.0, 1.0);
         let r = vc.maybe_retarget(16384.0, Utc::now() + Duration::seconds(31));
         assert!(r.is_some(), "fast miner should trigger retarget");
-        assert!(r.unwrap() > 16384.0 * HYSTERESIS - 1.0);
+        assert!(r.unwrap() > 16384.0 * HYSTERESIS_UP - 1.0);
     }
 
     /// Slow miner: 10× too slow → difficulty should decrease.
@@ -225,7 +250,34 @@ mod tests {
         add_shares(&mut vc, 30, 16384.0, 100.0);
         let r = vc.maybe_retarget(16384.0, Utc::now() + Duration::seconds(31));
         assert!(r.is_some(), "slow miner should trigger retarget");
-        assert!(r.unwrap() < 16384.0 / HYSTERESIS + 1.0);
+        assert!(r.unwrap() < 16384.0 / HYSTERESIS_DOWN + 1.0);
+    }
+
+    /// Time-based pruning should let a previously fast miner fall back down
+    /// once the recent accepted-share cadence slows materially.
+    #[test]
+    fn test_time_window_allows_downward_retarget() {
+        let mut vc = VardiffController::new(20.0, 30.0, 8192.0, 4_194_304.0);
+        let mut t = Utc::now();
+
+        vc.record_share(t, 262_144.0);
+        t += Duration::seconds(120);
+        vc.record_share(t, 262_144.0);
+        t += Duration::seconds(120);
+        vc.record_share(t, 262_144.0);
+
+        let r = vc.maybe_retarget(262_144.0, t + Duration::seconds(31));
+        assert!(r.is_some(), "slowdown should now trigger a lower diff");
+        assert!(r.unwrap() < 262_144.0);
+    }
+
+    /// Exact difficulty steps should be preserved instead of snapping to P2.
+    #[test]
+    fn test_clamp_diff_keeps_exact_integer_steps() {
+        let vc = VardiffController::new(20.0, 30.0, 8192.0, 4_194_304.0);
+        assert_eq!(vc.clamp_diff(100_000.4), 100_000.0);
+        assert_eq!(vc.clamp_diff(131_072.4), 131_072.0);
+        assert_eq!(vc.clamp_diff(999.4), 8_192.0);
     }
 
     /// Vardiff does NOT change block probability.

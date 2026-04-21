@@ -562,8 +562,9 @@ impl StratumServer {
                             suggested
                                 .clamp(self.config.min_difficulty, self.config.max_difficulty)
                         };
-                        // Round to nearest power-of-2 for clean, predictable steps.
-                        let target = guard.vardiff.nearest_p2(raw);
+                        // Keep exact integer difficulty steps so vardiff can move
+                        // down smoothly instead of getting stuck on coarse buckets.
+                        let target = guard.vardiff.clamp_diff(raw);
                         if (target - guard.difficulty).abs() > f64::EPSILON {
                             guard.difficulty = target;
                             let diff_msg = build_set_difficulty(target);
@@ -1155,6 +1156,7 @@ let job = session_job.job.clone();
                 let persist_blocks    = self.config.persist_blocks;
                 let engine            = self.template_engine.clone();
                 let sqlite_for_block  = self.sqlite.clone();
+                let found_by          = worker.to_owned();
                 tracing::info!(
                     "*** BLOCK FOUND by {worker} height={height} hash={block_hash} \
                      diff={:.2} template_key=\"{}\" ***",
@@ -1177,7 +1179,12 @@ let job = session_job.job.clone();
                         }
                     };
                     if persist_blocks {
-                        let _ = sqlite_for_block.insert_block(height as i64, &block_hash, status).await;
+                        let _ = sqlite_for_block.insert_block(
+                            height as i64,
+                            &block_hash,
+                            Some(found_by.as_str()),
+                            status,
+                        ).await;
                     }
                 });
             }
@@ -1188,12 +1195,9 @@ let job = session_job.job.clone();
         // outbound_msgs are sent (set_difficulty / notify follow in TCP stream order).
         let mut outbound_msgs: Vec<String> = Vec::new();
         let mut session_diff_after = 0.0f64;
+        let mut effective_job_diff = job_diff;
         {
             let mut guard = state.lock().await;
-
-            if result.accepted {
-                guard.vardiff.record_share(now, job_diff);
-            }
 
             if vardiff_enabled {
                 let current_diff = guard.difficulty;
@@ -1219,6 +1223,15 @@ let job = session_job.job.clone();
             }
 
             session_diff_after = guard.difficulty;
+
+            // Match ckpool-style accounting: if the session diff has already
+            // moved, count the share at the lower of the job threshold and the
+            // current session difficulty so late shares from an older job do not
+            // keep the estimator pinned high.
+            effective_job_diff = job_diff.min(session_diff_after);
+            if result.accepted {
+                guard.vardiff.record_share(now, effective_job_diff);
+            }
         }
 
         // ── Post-ack: round-trip proof logging ───────────────────────────────────
@@ -1308,7 +1321,7 @@ let job = session_job.job.clone();
                 // In-memory metrics + rare best-difficulty SQLite write.
                 if let Some(new_best) = metrics_s
                     .record_share(
-                        &worker, job_diff, share_diff, accepted, is_block,
+                        &worker, effective_job_diff, share_diff, accepted, is_block,
                         notify_to_submit_ms, submit_rtt_ms, job_age_secs,
                         notify_delay_ms, reconnect_recent,
                     ).await

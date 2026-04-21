@@ -200,7 +200,7 @@ struct MetricsState {
     miners: HashMap<String, MinerStats>,
     events: Vec<ShareEvent>,
     total_blocks: u64,
-    share_samples: HashMap<String, VecDeque<ShareSample>>,
+    share_samples: HashMap<String, ShareWindow>,
 }
 
 #[derive(Clone)]
@@ -249,26 +249,12 @@ impl MetricsStore {
             let samples = guard
                 .share_samples
                 .entry(worker.to_string())
-                .or_insert_with(VecDeque::new);
-            samples.push_back(ShareSample {
+                .or_insert_with(ShareWindow::default);
+            samples.push(ShareSample {
                 time: now,
                 difficulty: target_difficulty,
             });
-            if samples.len() > SHARE_CACHE_SIZE {
-                samples.pop_front();
-            }
-
-            // Need at least 2 samples to measure a time window.
-            if samples.len() >= 2 {
-                if let (Some(first), Some(last)) = (samples.front(), samples.back()) {
-                    let window_ms = (last.time - first.time).num_milliseconds().max(1) as f64;
-                    let sum_diff: f64 = samples.iter().skip(1).map(|s| s.difficulty).sum();
-                    let window_sec = window_ms / 1000.0;
-                    if sum_diff > 0.0 {
-                        new_hashrate = Some((sum_diff * HASHES_PER_DIFF) / window_sec / 1_000_000_000.0);
-                    }
-                }
-            }
+            new_hashrate = samples.hashrate_gh();
         }
 
         let mut new_best: Option<f64> = None;
@@ -494,4 +480,37 @@ impl MetricsStore {
 struct ShareSample {
     time: DateTime<Utc>,
     difficulty: f64,
+}
+
+#[derive(Default)]
+struct ShareWindow {
+    samples: VecDeque<ShareSample>,
+    total_difficulty: f64,
+}
+
+impl ShareWindow {
+    fn push(&mut self, sample: ShareSample) {
+        self.total_difficulty += sample.difficulty;
+        self.samples.push_back(sample);
+        while self.samples.len() > SHARE_CACHE_SIZE {
+            if let Some(removed) = self.samples.pop_front() {
+                self.total_difficulty -= removed.difficulty;
+            }
+        }
+    }
+
+    fn hashrate_gh(&self) -> Option<f64> {
+        if self.samples.len() < 2 {
+            return None;
+        }
+        let first = self.samples.front()?;
+        let last = self.samples.back()?;
+        let window_ms = (last.time - first.time).num_milliseconds().max(1) as f64;
+        let sum_diff = (self.total_difficulty - first.difficulty).max(0.0);
+        if sum_diff <= 0.0 {
+            return None;
+        }
+        let window_sec = window_ms / 1000.0;
+        Some((sum_diff * HASHES_PER_DIFF) / window_sec / 1_000_000_000.0)
+    }
 }

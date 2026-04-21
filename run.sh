@@ -24,9 +24,14 @@ if git rev-parse --git-dir &>/dev/null 2>&1; then
 fi
 
 # ── Compose overlay: Umbrel vs standalone ────────────────────────────────────
-if [ -f "/home/umbrel/umbrel/umbrel.yaml" ] || \
-   [ -d "/home/umbrel/umbrel/app-data" ]   || \
-   command -v umbreld &>/dev/null 2>&1; then
+# Allow explicit override so a non-Umbrel server never accidentally tries to
+# attach to an Umbrel-only external network.
+MODE="${BLACKHOLE_COMPOSE_MODE:-auto}"
+if [ "$MODE" = "umbrel" ]; then
+  COMPOSE_FILES="-f docker-compose.yml"
+elif [ "$MODE" = "standalone" ]; then
+  COMPOSE_FILES="-f docker-compose.standalone.yml"
+elif docker network inspect umbrel_main_network >/dev/null 2>&1; then
   COMPOSE_FILES="-f docker-compose.yml"
 else
   COMPOSE_FILES="-f docker-compose.standalone.yml"

@@ -91,6 +91,7 @@ impl SqliteStore {
                 id TEXT PRIMARY KEY,
                 height INTEGER NOT NULL,
                 block_hash TEXT NOT NULL,
+                found_by TEXT,
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
@@ -98,6 +99,8 @@ impl SqliteStore {
         )
         .execute(pool.as_ref())
         .await?;
+
+        self.ensure_blocks_found_by_column().await?;
 
         sqlx::query(
             r#"
@@ -131,6 +134,28 @@ impl SqliteStore {
         )
         .execute(pool.as_ref())
         .await?;
+
+        Ok(())
+    }
+
+    async fn ensure_blocks_found_by_column(&self) -> anyhow::Result<()> {
+        let Some(pool) = &self.pool else {
+            return Ok(());
+        };
+
+        let rows = sqlx::query("PRAGMA table_info(blocks)")
+            .fetch_all(pool.as_ref())
+            .await?;
+        let has_found_by = rows.iter().any(|row| {
+            let name: String = row.get("name");
+            name == "found_by"
+        });
+
+        if !has_found_by {
+            sqlx::query("ALTER TABLE blocks ADD COLUMN found_by TEXT")
+                .execute(pool.as_ref())
+                .await?;
+        }
 
         Ok(())
     }
@@ -205,6 +230,7 @@ impl SqliteStore {
         &self,
         height: i64,
         block_hash: &str,
+        found_by: Option<&str>,
         status: &str,
     ) -> anyhow::Result<()> {
         let Some(pool) = &self.pool else {
@@ -213,29 +239,30 @@ impl SqliteStore {
 
         sqlx::query(
             r#"
-            INSERT INTO blocks (id, height, block_hash, status, created_at)
-            VALUES (?1, ?2, ?3, ?4, ?5)
+            INSERT INTO blocks (id, height, block_hash, found_by, status, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
             "#,
         )
         .bind(Uuid::new_v4().to_string())
         .bind(height)
         .bind(block_hash)
+        .bind(found_by)
         .bind(status)
-        .bind(Utc::now())
+        .bind(Utc::now().to_rfc3339())
         .execute(pool.as_ref())
         .await?;
 
         Ok(())
     }
 
-    pub async fn fetch_blocks(&self, limit: i64) -> anyhow::Result<Vec<(i64, String, String)>> {
+    pub async fn fetch_blocks(&self, limit: i64) -> anyhow::Result<Vec<(i64, String, Option<String>, String, String)>> {
         let Some(pool) = &self.pool else {
             return Ok(vec![]);
         };
 
         let rows = sqlx::query(
             r#"
-            SELECT height, block_hash, status
+            SELECT height, block_hash, found_by, status, created_at
             FROM blocks
             ORDER BY created_at DESC
             LIMIT ?1
@@ -249,8 +276,10 @@ impl SqliteStore {
         for row in rows {
             let height: i64 = row.get("height");
             let hash: String = row.get("block_hash");
+            let found_by: Option<String> = row.try_get("found_by")?;
             let status: String = row.get("status");
-            out.push((height, hash, status));
+            let created_at: String = row.get("created_at");
+            out.push((height, hash, found_by, status, created_at));
         }
         Ok(out)
     }

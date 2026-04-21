@@ -68,7 +68,16 @@ export type HashrateResponse = {
 export type BlockRow = {
   height: number;
   hash: string;
+  found_by: string | null;
   status: string;
+  created_at: string;
+};
+
+export type PublicBlockRow = {
+  height: number;
+  hash: string;
+  timestamp: string;
+  pool: string | null;
 };
 
 export type NetworkInfo = {
@@ -91,6 +100,7 @@ export type TemplateInfo = {
 
 const configuredBase = (import.meta.env.VITE_API_BASE ?? "").trim();
 const configuredBases = (import.meta.env.VITE_API_BASES ?? "").trim();
+const configuredMempoolBase = (import.meta.env.VITE_MEMPOOL_API_BASE ?? "https://mempool.space/api").trim();
 
 const apiUrl = (base: string, path: string) => `${base.replace(/\/$/, "")}${path}`;
 
@@ -98,6 +108,10 @@ async function fetchJson<T>(url: string): Promise<T> {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json() as Promise<T>;
+}
+
+function mempoolUrl(path: string): string {
+  return `${configuredMempoolBase.replace(/\/$/, "")}${path}`;
 }
 
 function getBases(): string[] {
@@ -172,6 +186,45 @@ export const fetchBlocks = async (): Promise<BlockRow[]> => {
     for (const b of ([] as BlockRow[]).concat(...parts))
       uniq.set(`${b.height}:${b.hash}`, b);
     return Array.from(uniq.values()).sort((a, b) => b.height - a.height);
+  } catch {
+    return [];
+  }
+};
+
+type MempoolBlock = {
+  id?: string;
+  hash?: string;
+  height?: number;
+  timestamp?: number;
+  extras?: {
+    pool?: { name?: string; slug?: string };
+    pool_name?: string;
+    poolName?: string;
+    miner?: string;
+  };
+};
+
+export const fetchPublicBlocks = async (): Promise<PublicBlockRow[]> => {
+  try {
+    const tipHeight = Number(await fetchJson<unknown>(mempoolUrl("/blocks/tip/height")));
+    const blocks = await fetchJson<MempoolBlock[]>(mempoolUrl(`/blocks/${tipHeight}`));
+    return (blocks || []).slice(0, 10).map((block) => {
+      const hash = block.id ?? block.hash ?? "";
+      const pool =
+        block.extras?.pool?.name ??
+        block.extras?.pool?.slug ??
+        block.extras?.pool_name ??
+        block.extras?.poolName ??
+        block.extras?.miner ??
+        null;
+
+      return {
+        height: Number(block.height ?? 0),
+        hash,
+        timestamp: new Date((block.timestamp ?? 0) * 1000).toISOString(),
+        pool,
+      };
+    }).filter((b) => b.height > 0 && b.hash.length > 0);
   } catch {
     return [];
   }

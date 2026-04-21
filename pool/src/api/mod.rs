@@ -169,7 +169,9 @@ async fn hashrate(State(state): State<ApiState>) -> impl IntoResponse {
 struct BlockRow {
     height: i64,
     hash: String,
+    found_by: Option<String>,
     status: String,
+    created_at: String,
 }
 
 async fn blocks(State(state): State<ApiState>) -> impl IntoResponse {
@@ -180,7 +182,13 @@ async fn blocks(State(state): State<ApiState>) -> impl IntoResponse {
 
     let blocks = rows
         .into_iter()
-        .map(|(height, hash, status)| BlockRow { height, hash, status })
+        .map(|(height, hash, found_by, status, created_at)| BlockRow {
+            height,
+            hash,
+            found_by,
+            status,
+            created_at,
+        })
         .collect::<Vec<_>>();
     Json(blocks)
 }
