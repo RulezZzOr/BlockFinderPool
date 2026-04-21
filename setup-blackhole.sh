@@ -680,10 +680,17 @@ IMAGE_ID=$(docker image inspect blackhole-blackhole-pool:latest \
   --format '{{.Id}}' 2>/dev/null || echo unknown)
 
 PROJECT_NAME="$(basename "$SCRIPT_DIR" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')"
-docker rm -f \
-  "${PROJECT_NAME}_blackhole-pool_1" \
-  "${PROJECT_NAME}_blackhole-dashboard_1" \
-  2>/dev/null || true
+# Docker Compose v1 can get stuck trying to recreate old containers whose
+# metadata no longer matches the rebuilt image. Remove every container that
+# still belongs to this project before bringing services back up.
+EXISTING_CONTAINERS=$(
+  docker ps -aq \
+    --filter "label=com.docker.compose.project=${PROJECT_NAME}" \
+    2>/dev/null || true
+)
+if [ -n "$EXISTING_CONTAINERS" ]; then
+  echo "$EXISTING_CONTAINERS" | xargs -r docker rm -f >/dev/null 2>&1 || true
+fi
 
 ( export BUILD_GIT_SHA="$BUILD_SHA" BUILD_GIT_DIRTY="$BUILD_DIRTY" \
          BUILD_SOURCE="setup-blackhole.sh" BUILD_TIME_UTC="$BUILD_TIME" \
