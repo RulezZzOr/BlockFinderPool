@@ -5,6 +5,7 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
 use chrono::{DateTime, Duration, Utc};
+use reqwest::Client;
 use serde::Deserialize;
 use serde::Serialize;
 use tracing::info;
@@ -68,6 +69,7 @@ impl ApiServer {
             .route("/shares", get(shares))
             .route("/hashrate", get(hashrate))
             .route("/blocks", get(blocks))
+            .route("/public-blocks", get(public_blocks))
             .route("/pool", get(pool))
             .route("/network", get(network))
             .route("/blockfinder/status",            get(blackhole_status))
@@ -179,6 +181,38 @@ struct BlockRow {
     created_at: String,
 }
 
+#[derive(Serialize)]
+struct PublicBlockRow {
+    height: i64,
+    hash: String,
+    timestamp: String,
+    pool: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MempoolBlock {
+    id: Option<String>,
+    hash: Option<String>,
+    height: Option<i64>,
+    timestamp: Option<i64>,
+    extras: Option<MempoolExtras>,
+}
+
+#[derive(Deserialize)]
+struct MempoolExtras {
+    pool: Option<MempoolPool>,
+    pool_name: Option<String>,
+    #[serde(rename = "poolName")]
+    pool_name_alt: Option<String>,
+    miner: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MempoolPool {
+    name: Option<String>,
+    slug: Option<String>,
+}
+
 async fn blocks(State(state): State<ApiState>) -> impl IntoResponse {
     let rows = match state.sqlite.fetch_blocks(50).await {
         Ok(rows) => rows,
@@ -196,6 +230,68 @@ async fn blocks(State(state): State<ApiState>) -> impl IntoResponse {
         })
         .collect::<Vec<_>>();
     Json(blocks)
+}
+
+async fn public_blocks() -> impl IntoResponse {
+    let client = match Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return Json(Vec::<PublicBlockRow>::new()),
+    };
+
+    let tip_height = match client
+        .get("https://mempool.space/api/blocks/tip/height")
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+    {
+        Ok(response) => match response.text().await.ok().and_then(|s| s.trim().parse::<i64>().ok()) {
+            Some(height) => height,
+            None => return Json(Vec::<PublicBlockRow>::new()),
+        },
+        Err(_) => return Json(Vec::<PublicBlockRow>::new()),
+    };
+
+    let blocks = match client
+        .get(format!("https://mempool.space/api/blocks/{tip_height}"))
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+    {
+        Ok(response) => match response.json::<Vec<MempoolBlock>>().await {
+            Ok(blocks) => blocks,
+            Err(_) => return Json(Vec::<PublicBlockRow>::new()),
+        },
+        Err(_) => return Json(Vec::<PublicBlockRow>::new()),
+    };
+
+    let rows = blocks
+        .into_iter()
+        .take(10)
+        .filter_map(|block| {
+            let height = block.height?;
+            let hash = block.id.or(block.hash)?;
+            let timestamp = DateTime::<Utc>::from_timestamp(block.timestamp?, 0)?.to_rfc3339();
+            let pool = block.extras.and_then(|extras| {
+                extras.pool.and_then(|pool| pool.name.or(pool.slug))
+                    .or(extras.pool_name)
+                    .or(extras.pool_name_alt)
+                    .or(extras.miner)
+            });
+
+            Some(PublicBlockRow {
+                height,
+                hash,
+                timestamp,
+                pool,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Json(rows)
 }
 
 #[derive(Serialize)]

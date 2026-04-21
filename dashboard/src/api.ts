@@ -206,6 +206,10 @@ type MempoolBlock = {
 
 export const fetchPublicBlocks = async (): Promise<PublicBlockRow[]> => {
   try {
+    try {
+      return await apiGet<PublicBlockRow[]>("/public-blocks");
+    } catch {}
+
     const tipHeight = Number(await fetchJson<unknown>(mempoolUrl("/blocks/tip/height")));
     const blocks = await fetchJson<MempoolBlock[]>(mempoolUrl(`/blocks/${tipHeight}`));
     return (blocks || []).slice(0, 10).map((block) => {
