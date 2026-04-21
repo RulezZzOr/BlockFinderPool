@@ -670,7 +670,7 @@ IMAGE_ID=$(docker image inspect blackhole-blackhole-pool:latest \
          RUNTIME_IMAGE_ID="$IMAGE_ID" \
          RUNTIME_IMAGE_REF="blackhole-blackhole-pool:latest" \
          RUNTIME_CONTAINER_NAME="blackhole-blackhole-pool-1"; \
-  $DC $COMPOSE_FILES up -d --remove-orphans )
+  "${DC[@]}" "${COMPOSE_FILES[@]}" up -d --remove-orphans )
 
 ok "Containers started"
 
