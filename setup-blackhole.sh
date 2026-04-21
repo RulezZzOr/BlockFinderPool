@@ -665,6 +665,12 @@ sep; info "Phase 10 — Starting BlockFinder"
 IMAGE_ID=$(docker image inspect blackhole-blackhole-pool:latest \
   --format '{{.Id}}' 2>/dev/null || echo unknown)
 
+PROJECT_NAME="$(basename "$SCRIPT_DIR" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')"
+docker rm -f \
+  "${PROJECT_NAME}_blackhole-pool_1" \
+  "${PROJECT_NAME}_blackhole-dashboard_1" \
+  2>/dev/null || true
+
 ( export BUILD_GIT_SHA="$BUILD_SHA" BUILD_GIT_DIRTY="$BUILD_DIRTY" \
          BUILD_SOURCE="setup-blackhole.sh" BUILD_TIME_UTC="$BUILD_TIME" \
          RUNTIME_IMAGE_ID="$IMAGE_ID" \
