@@ -257,7 +257,7 @@ impl TemplateEngine {
 
     pub fn zmq_connected(&self) -> bool {
         self.zmq_block_connected.load(Ordering::Relaxed)
-            || self.zmq_tx_connected.load(Ordering::Relaxed)
+            && self.zmq_tx_connected.load(Ordering::Relaxed)
     }
 
     pub fn zmq_block_connected(&self) -> bool {
