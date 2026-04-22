@@ -84,7 +84,7 @@ impl VardiffController {
         max_diff:          f64,
     ) -> Self {
         let now = Utc::now();
-        let sample_window_secs = (target_share_time.max(1.0) * 4.0).clamp(90.0, 300.0);
+        let sample_window_secs = (target_share_time.max(1.0) * 4.0).clamp(180.0, 300.0);
         Self {
             target_share_time: target_share_time.max(1.0),
             retarget_time:     retarget_time.max(1.0),

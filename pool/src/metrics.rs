@@ -413,10 +413,10 @@ impl WorkerState {
             session_best_accepted_difficulty: self.session_best_accepted_difficulty.load(),
             worker_best_submitted_difficulty: self.worker_best_submitted_difficulty.load(),
             worker_best_accepted_difficulty: self.worker_best_accepted_difficulty.load(),
-            current_block_best_submitted_difficulty,
+            current_block_best_submitted_difficulty: current_block_best_submitted,
             current_block_best_accepted_difficulty: current_block_best_accepted,
             current_block_best_candidate_difficulty: self.current_block_best_candidate_difficulty.load(),
-            previous_block_best_submitted_difficulty,
+            previous_block_best_submitted_difficulty: previous_block_best_submitted,
             previous_block_best_accepted_difficulty: previous_block_best_accepted,
             previous_block_best_candidate_difficulty: self.previous_block_best_candidate_difficulty.load(),
             last_share_status,
@@ -1018,7 +1018,7 @@ impl MetricsStore {
             if session_id.is_some() {
                 meta.session_id = session_id;
             }
-        }
+        };
     }
 
     pub async fn snapshot(&self) -> MetricsSnapshot {
@@ -1096,7 +1096,7 @@ struct ShareSample {
     difficulty: f64,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct ShareWindow {
     samples: VecDeque<ShareSample>,
     total_difficulty: f64,
@@ -1347,16 +1347,13 @@ mod tests {
         metrics.record_miner_seen("worker-e", 64.0, None, None).await;
 
         let snapshot = metrics.snapshot().await;
-        let db_path = std::env::temp_dir()
-            .join(format!("blockfinder_best_{}.db", uuid::Uuid::new_v4()));
-        let url = format!("sqlite://{}", db_path.display());
-        let sqlite = SqliteStore::connect(Some(&url)).await.unwrap();
+        let sqlite = SqliteStore::connect(Some("sqlite::memory:")).await.unwrap();
+        assert!(sqlite.is_enabled());
         sqlite.persist_best_snapshot(&snapshot).await.unwrap();
         let bests = sqlite.load_worker_bests().await.unwrap();
         let (submitted, accepted, candidate) = bests.get("worker-e").copied().unwrap();
         assert_eq!(submitted, 123.0);
         assert_eq!(accepted, 111.0);
         assert_eq!(candidate, 99.0);
-        let _ = std::fs::remove_file(db_path);
     }
 }

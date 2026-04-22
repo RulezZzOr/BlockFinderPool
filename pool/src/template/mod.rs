@@ -256,8 +256,11 @@ impl TemplateEngine {
     }
 
     pub fn zmq_connected(&self) -> bool {
-        self.zmq_block_connected.load(Ordering::Relaxed)
-            && self.zmq_tx_connected.load(Ordering::Relaxed)
+        let block_required = !self.config.zmq_block_urls.is_empty();
+        let tx_required = !self.config.zmq_tx_urls.is_empty();
+
+        (!block_required || self.zmq_block_connected.load(Ordering::Relaxed))
+            && (!tx_required || self.zmq_tx_connected.load(Ordering::Relaxed))
     }
 
     pub fn zmq_block_connected(&self) -> bool {

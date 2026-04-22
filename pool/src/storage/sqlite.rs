@@ -431,6 +431,7 @@ impl SqliteStore {
         )
         .bind(worker)
         .bind(best_submitted)
+        .bind(best_submitted)
         .bind(best_accepted)
         .bind(best_block_candidate)
         .bind(Utc::now().to_rfc3339())
@@ -705,8 +706,8 @@ impl SqliteStore {
             INSERT INTO block_candidates (
                 id, worker, payout_address, session_id, job_id, height, prevhash,
                 ntime, nonce, version, version_mask, extranonce1, extranonce2,
-                merkle_root, coinbase_hex, block_header_hex, block_hex, block_hash,
-                full_block_hex,
+                merkle_root, coinbase_hex, block_header_hex, block_hex,
+                full_block_hex, block_hash,
                 submitted_difficulty, network_difficulty, current_share_difficulty,
                 submitblock_requested_at, submitblock_result, submitblock_latency_ms,
                 rpc_error, created_at
@@ -731,8 +732,8 @@ impl SqliteStore {
         .bind(record.coinbase_hex)
         .bind(record.block_header_hex)
         .bind(record.block_hex)
-        .bind(record.block_hash)
         .bind(record.full_block_hex)
+        .bind(record.block_hash)
         .bind(record.submitted_difficulty)
         .bind(record.network_difficulty)
         .bind(record.current_share_difficulty)
@@ -958,24 +959,23 @@ mod tests {
             merkle_root: "deadbeef".to_string(),
             coinbase_hex: Some("0100".to_string()),
             block_header_hex: "0200".to_string(),
-            block_hex: Some("0300".to_string()),
-            full_block_hex: Some("0300".to_string()),
+            block_hex: Some("blockhex".to_string()),
+            full_block_hex: Some("fullblock".to_string()),
             block_hash: "hash".to_string(),
             submitted_difficulty: 42.0,
             network_difficulty: 100.0,
             current_share_difficulty: 21.0,
             submitblock_requested_at: requested_at,
-            submitblock_result: "pending".to_string(),
-            submitblock_latency_ms: 0,
-            rpc_error: None,
+            submitblock_result: "submitted".to_string(),
+            submitblock_latency_ms: 17,
+            rpc_error: Some("rpc warning".to_string()),
             created_at: requested_at,
         };
 
-        store.insert_block_candidate(record.clone()).await.expect("insert candidate");
         store
-            .update_block_candidate_result(record.id, "submitted", 17, None)
+            .insert_block_candidate(record.clone())
             .await
-            .expect("update candidate");
+            .expect("insert candidate");
 
         let rows = store.fetch_block_candidates(10).await.expect("fetch candidates");
         assert_eq!(rows.len(), 1);
@@ -983,16 +983,20 @@ mod tests {
         assert_eq!(rows[0].block_hash, "hash");
         assert_eq!(rows[0].submitblock_result, "submitted");
         assert_eq!(rows[0].submitblock_latency_ms, 17);
-        assert_eq!(rows[0].full_block_hex.as_deref(), Some("0300"));
+        assert_eq!(rows[0].block_hex.as_deref(), Some("blockhex"));
+        assert_eq!(rows[0].full_block_hex.as_deref(), Some("fullblock"));
+        assert_eq!(rows[0].block_hash, "hash");
 
         let fetched = store
             .fetch_block_candidate(record.id)
             .await
             .expect("fetch candidate by id");
+        assert_eq!(fetched.as_ref().and_then(|row| row.block_hex.as_deref()), Some("blockhex"));
+        assert_eq!(fetched.as_ref().and_then(|row| row.full_block_hex.as_deref()), Some("fullblock"));
         assert_eq!(fetched.as_ref().map(|row| row.block_hash.as_str()), Some("hash"));
         assert_eq!(
             fetched.as_ref().and_then(|row| row.full_block_hex.as_deref()),
-            Some("0300")
+            Some("fullblock")
         );
     }
 }

@@ -462,7 +462,7 @@ impl StratumServer {
 
                     if authorized {
                         // Update session state quickly, but don't await while holding the lock.
-                        let (difficulty, user_agent, extranonce1, diff_msg, notify_opt) = {
+                        let (difficulty, user_agent, session_id, extranonce1, diff_msg, notify_opt) = {
                             let mut guard = state.lock().await;
                             guard.authorized = true;
                             guard.worker = worker.clone();
@@ -471,6 +471,7 @@ impl StratumServer {
 
                             let difficulty = guard.difficulty;
                             let user_agent = guard.user_agent.clone();
+                            let session_id = guard.session_id.clone();
                             let extranonce1 = guard.extranonce1.clone();
 
                             let diff_msg = build_set_difficulty(difficulty);
@@ -494,7 +495,7 @@ impl StratumServer {
                                 None
                             };
 
-                            (difficulty, user_agent, extranonce1, diff_msg, notify_opt)
+                            (difficulty, user_agent, session_id, extranonce1, diff_msg, notify_opt)
                         };
 
                         // Log extranonce1 assignment for search-space verification.
@@ -516,7 +517,7 @@ impl StratumServer {
                         }
 
                         self.metrics
-                            .record_miner_seen(&worker, difficulty, user_agent, Some(extranonce1))
+                            .record_miner_seen(&worker, difficulty, user_agent, Some(session_id))
                             .await;
 
                         let _ = tx.send(diff_msg).await;
@@ -795,7 +796,7 @@ impl StratumServer {
 
 
         // Grab everything needed for validation with a short lock (no await-heavy work inside).
-        let (version_mask, session_job, last_notify, session_start, vardiff_enabled, session_worker, session_extranonce1, session_payout_address, early_reply, stale_reason) = {
+        let (version_mask, session_job, last_notify, session_start, vardiff_enabled, session_worker, session_session_id, session_extranonce1, session_payout_address, early_reply, stale_reason) = {
             let guard = state.lock().await;
 
             if !guard.authorized {
@@ -811,6 +812,7 @@ impl StratumServer {
                     guard.session_start,
                     guard.vardiff_enabled,
                     guard.worker.clone(),
+                    guard.session_id.clone(),
                     guard.extranonce1.clone(),
                     guard.session_payout_address.clone(),
                     Some(response.to_string()),
@@ -825,6 +827,7 @@ impl StratumServer {
                         guard.session_start,
                         guard.vardiff_enabled,
                         guard.worker.clone(),
+                        guard.session_id.clone(),
                         guard.extranonce1.clone(),
                         guard.session_payout_address.clone(),
                         None,
@@ -874,6 +877,7 @@ impl StratumServer {
                             guard.session_start,
                             guard.vardiff_enabled,
                             stale_worker,
+                            guard.session_id.clone(),
                             guard.extranonce1.clone(),
                             guard.session_payout_address.clone(),
                             Some(response.to_string()),
@@ -901,7 +905,8 @@ impl StratumServer {
 
 
         let worker = if !session_worker.is_empty() { session_worker } else { submitted_worker.clone() };
-let job = session_job.job.clone();
+        let session_id = session_session_id;
+        let job = session_job.job.clone();
         let job_diff = session_job.difficulty;
 
         // Version rolling (BIP310):
@@ -1113,7 +1118,7 @@ let job = session_job.job.clone();
                     id: Uuid::new_v4(),
                     worker: worker.clone(),
                     payout_address: session_payout_address.clone(),
-                    session_id: Some(session_extranonce1.clone()),
+                    session_id: Some(session_id.clone()),
                     job_id: session_job.session_job_id.clone(),
                     height: height as i64,
                     prevhash: job.prevhash.clone(),
@@ -1144,7 +1149,6 @@ let job = session_job.job.clone();
                     result.difficulty, job.template_key,
                 );
                 tokio::spawn(async move {
-                    let candidate_id = candidate_record.id;
                     let submit_started = std::time::Instant::now();
                     let (status, rpc_error) = match engine.submit_block(
                         &block_hex_owned, &block_hash, &template_key,
@@ -1161,22 +1165,26 @@ let job = session_job.job.clone();
                             ("submit_failed", Some(err.to_string()))
                         }
                     };
-                    let _ = sqlite_for_block.insert_block_candidate(candidate_record).await;
-                    let _ = sqlite_for_block
-                        .update_block_candidate_result(
-                            candidate_id,
-                            status,
-                            submit_started.elapsed().as_millis() as i64,
-                            rpc_error.as_deref(),
-                        )
-                        .await;
+                    let mut candidate_record = candidate_record;
+                    candidate_record.submitblock_result = status.to_string();
+                    candidate_record.submitblock_latency_ms = submit_started.elapsed().as_millis() as i64;
+                    candidate_record.rpc_error = rpc_error;
+                    if let Err(err) = sqlite_for_block.insert_block_candidate(candidate_record).await {
+                        tracing::error!(
+                            "failed to persist block candidate forensic record: {err:?}"
+                        );
+                    }
                     if persist_blocks {
-                        let _ = sqlite_for_block.insert_block(
+                        if let Err(err) = sqlite_for_block.insert_block(
                             height as i64,
                             &block_hash,
                             Some(found_by.as_str()),
                             status,
-                        ).await;
+                        ).await {
+                            tracing::error!(
+                                "failed to persist found block summary: {err:?}"
+                            );
+                        }
                     }
                 });
             }
@@ -1489,6 +1497,7 @@ struct SessionState {
     authorized: bool,
     worker: String,
     user_agent: Option<String>,
+    session_id: String,
     extranonce1: String,
     extranonce1_bytes: Vec<u8>,
     difficulty: f64,
@@ -1556,6 +1565,7 @@ impl SessionState {
             authorized: false,
             worker: String::new(),
             user_agent: None,
+            session_id: Uuid::new_v4().to_string(),
             extranonce1,
             extranonce1_bytes,
             difficulty: initial_diff,
