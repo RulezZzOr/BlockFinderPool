@@ -10,7 +10,7 @@ Zero fee — 100% of every block reward goes directly to the miner's own address
 | Component | Technology | Port |
 |---|---|---|
 | Stratum server | Rust + Tokio | 3333 |
-| REST API | Axum | 8081 (host) |
+| REST API | Axum | 8080 (standalone) / 8081 (bridge) |
 | Dashboard | React + Nginx | 3334 (host) |
 | Bitcoin node | Bitcoin Core via RPC + ZMQ | (external) |
 | Database | SQLite | (Docker volume) |
@@ -234,11 +234,14 @@ Donation address:
 
 `bc1pzvqagy932kmts9rluzpq39upk0hnttz22gdyeslf8lpc4aepyrqslfds96`
 
+Feel free to use it. We are all one family.
+
 ---
 
 ## API
 
-The REST API is available on port `8081`:
+The REST API is available on port `8080` in standalone mode, or `8081` when
+running through the Docker bridge setup:
 
 | Endpoint | Description |
 |---|---|

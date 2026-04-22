@@ -1144,35 +1144,30 @@ let job = session_job.job.clone();
                     result.difficulty, job.template_key,
                 );
                 tokio::spawn(async move {
-                    let submit_started = std::time::Instant::now();
                     let candidate_id = candidate_record.id;
                     let _ = sqlite_for_block.insert_block_candidate(candidate_record).await;
-                    let status = match engine.submit_block(
+                    let submit_started = std::time::Instant::now();
+                    let (status, rpc_error) = match engine.submit_block(
                         &block_hex_owned, &block_hash, &template_key,
                         &coinbase_hex_owned, &txid_root, &witness,
                     ).await {
                         Ok(_) => {
                             tracing::info!("BLOCK SUBMITTED OK height={height} hash={block_hash}");
-                            "submitted"
+                            ("submitted", None)
                         }
                         Err(err) => {
                             tracing::error!(
                                 "BLOCK SUBMIT FAILED height={height} hash={block_hash} — {err:?}"
                             );
-                            "submit_failed"
+                            ("submit_failed", Some(err.to_string()))
                         }
-                    };
-                    let rpc_error = if status == "submit_failed" {
-                        Some("submitblock RPC failure")
-                    } else {
-                        None
                     };
                     let _ = sqlite_for_block
                         .update_block_candidate_result(
                             candidate_id,
                             status,
                             submit_started.elapsed().as_millis() as i64,
-                            rpc_error,
+                            rpc_error.as_deref(),
                         )
                         .await;
                     if persist_blocks {

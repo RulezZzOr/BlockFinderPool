@@ -200,6 +200,7 @@ impl SqliteStore {
         .await?;
 
         self.ensure_blocks_found_by_column().await?;
+        self.ensure_block_candidate_columns().await?;
 
         sqlx::query(
             r#"
@@ -237,8 +238,6 @@ impl SqliteStore {
         .execute(pool.as_ref())
         .await?;
 
-        self.ensure_worker_best_columns().await?;
-
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS best_summaries (
@@ -260,6 +259,9 @@ impl SqliteStore {
         )
         .execute(pool.as_ref())
         .await?;
+
+        self.ensure_worker_best_columns().await?;
+        self.ensure_best_summaries_columns().await?;
 
         Ok(())
     }
@@ -319,6 +321,79 @@ impl SqliteStore {
 
         if !has_found_by {
             sqlx::query("ALTER TABLE blocks ADD COLUMN found_by TEXT")
+                .execute(pool.as_ref())
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn ensure_best_summaries_columns(&self) -> anyhow::Result<()> {
+        let Some(pool) = &self.pool else {
+            return Ok(());
+        };
+
+        let rows = sqlx::query("PRAGMA table_info(best_summaries)")
+            .fetch_all(pool.as_ref())
+            .await?;
+
+        let has_best_submitted = rows.iter().any(|row| {
+            row.try_get::<String, _>("name")
+                .map(|name| name == "best_submitted_diff")
+                .unwrap_or(false)
+        });
+        if !has_best_submitted {
+            sqlx::query(
+                "ALTER TABLE best_summaries ADD COLUMN best_submitted_diff REAL NOT NULL DEFAULT 0",
+            )
+            .execute(pool.as_ref())
+            .await?;
+        }
+
+        let has_best_accepted = rows.iter().any(|row| {
+            row.try_get::<String, _>("name")
+                .map(|name| name == "best_accepted_diff")
+                .unwrap_or(false)
+        });
+        if !has_best_accepted {
+            sqlx::query(
+                "ALTER TABLE best_summaries ADD COLUMN best_accepted_diff REAL NOT NULL DEFAULT 0",
+            )
+            .execute(pool.as_ref())
+            .await?;
+        }
+
+        let has_best_block_candidate = rows.iter().any(|row| {
+            row.try_get::<String, _>("name")
+                .map(|name| name == "best_block_candidate_diff")
+                .unwrap_or(false)
+        });
+        if !has_best_block_candidate {
+            sqlx::query(
+                "ALTER TABLE best_summaries ADD COLUMN best_block_candidate_diff REAL NOT NULL DEFAULT 0",
+            )
+            .execute(pool.as_ref())
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn ensure_block_candidate_columns(&self) -> anyhow::Result<()> {
+        let Some(pool) = &self.pool else {
+            return Ok(());
+        };
+
+        let rows = sqlx::query("PRAGMA table_info(block_candidates)")
+            .fetch_all(pool.as_ref())
+            .await?;
+        let has_full_block_hex = rows.iter().any(|row| {
+            let name: String = row.get("name");
+            name == "full_block_hex"
+        });
+
+        if !has_full_block_hex {
+            sqlx::query("ALTER TABLE block_candidates ADD COLUMN full_block_hex TEXT")
                 .execute(pool.as_ref())
                 .await?;
         }
