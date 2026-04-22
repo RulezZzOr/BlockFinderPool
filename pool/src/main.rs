@@ -182,6 +182,20 @@ async fn run() -> anyhow::Result<()> {
                 if let Err(err) = sqlite_s.persist_best_snapshot(&snapshot).await {
                     tracing::warn!("best summary persistence failed: {err:?}");
                 }
+                let current_template_age_secs = template_engine
+                    .template_age_secs();
+                let current_window = metrics_s
+                    .current_block_window_snapshot(current_template_age_secs)
+                    .await;
+                if let Err(err) = sqlite_s.upsert_block_window(current_window.into()).await {
+                    tracing::warn!("current block window persistence failed: {err:?}");
+                }
+                let finalized_windows = metrics_s.finalized_block_windows_snapshot().await;
+                for window in finalized_windows {
+                    if let Err(err) = sqlite_s.upsert_block_window(window.into()).await {
+                        tracing::warn!("finalized block window persistence failed: {err:?}");
+                    }
+                }
             }
         });
     }

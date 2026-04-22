@@ -211,6 +211,8 @@ BlockFinder includes a solo-hunter path tuned for small LAN fleets and block dis
 - candidate data is written to the `block_candidates` SQLite table even when `PERSIST_SHARES=false`
 - the dashboard shows raw best, accepted best, current-block best, previous-block best, and a recent candidate log
 
+Recent Block Windows show the best share seen by BlockFinder during each Bitcoin network block interval. These are not found blocks unless the share reaches network difficulty and appears in Block Candidates / Blocks Found.
+
 This mode is intended for home users with 1–5 miners on the same LAN. It favors low-latency block discovery and honest reporting over public-pool accounting features.
 
 ### Candidate logging

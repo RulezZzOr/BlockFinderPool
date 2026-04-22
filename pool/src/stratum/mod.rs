@@ -1079,14 +1079,15 @@ impl StratumServer {
         // Raw best-share accounting is updated immediately after the hash is known,
         // before duplicate rejection or any persistence work.
         let is_stale_block = session_job.is_stale_block.load(Ordering::Acquire);
-        self.metrics
-            .record_raw_share(
-                &worker,
-                session_job.difficulty,
-                result.difficulty,
-                result.is_block,
-                is_stale_block,
-            )
+            self.metrics
+                .record_raw_share(
+                    &worker,
+                    session_payout_address.as_deref(),
+                    session_job.difficulty,
+                    result.difficulty,
+                    result.is_block,
+                    is_stale_block,
+                )
             .await;
 
         // High-priority submitblock path: fire before duplicate/reject bookkeeping
@@ -1245,6 +1246,7 @@ impl StratumServer {
 
         if duplicate {
             self.metrics.counters.inc_duplicate_share();
+            self.metrics.record_duplicate().await;
             tracing::debug!(
                 "duplicate share from {worker}: job={job_id} nonce={nonce_clean} ntime={ntime_clean} en2={extranonce2_clean} ver={version_key}"
             );

@@ -9,6 +9,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::metrics::MetricsSnapshot;
+use crate::metrics::BlockWindowSnapshot;
 
 #[derive(Clone)]
 pub struct SqliteStore {
@@ -85,6 +86,159 @@ pub struct BlockCandidateRow {
     pub submitblock_result: String,
     pub submitblock_latency_ms: i64,
     pub rpc_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BlockWindowRecord {
+    pub id: String,
+    pub height: i64,
+    pub prevhash: String,
+    pub block_hash: Option<String>,
+    pub started_at: DateTime<Utc>,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub duration_secs: Option<i64>,
+    pub external_pool: Option<String>,
+    pub tx_count: i64,
+    pub fee_rate_sat_vb: Option<f64>,
+    pub best_submitted_difficulty: f64,
+    pub best_accepted_difficulty: f64,
+    pub best_block_candidate_difficulty: f64,
+    pub best_worker: Option<String>,
+    pub best_payout_address: Option<String>,
+    pub best_submitted_worker: Option<String>,
+    pub best_submitted_payout_address: Option<String>,
+    pub best_accepted_worker: Option<String>,
+    pub best_candidate_worker: Option<String>,
+    pub share_count: i64,
+    pub accepted_count: i64,
+    pub stale_count: i64,
+    pub duplicate_count: i64,
+    pub avg_pool_hashrate: Option<f64>,
+    pub template_key: String,
+    pub job_id: String,
+    pub network_difficulty: f64,
+    pub in_progress: bool,
+    pub current_template_age_secs: Option<i64>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockWindowRow {
+    pub id: String,
+    pub height: i64,
+    pub prevhash: String,
+    pub block_hash: Option<String>,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub duration_secs: Option<i64>,
+    pub external_pool: Option<String>,
+    pub tx_count: i64,
+    pub fee_rate_sat_vb: Option<f64>,
+    pub best_submitted_difficulty: f64,
+    pub best_accepted_difficulty: f64,
+    pub best_block_candidate_difficulty: f64,
+    pub best_worker: Option<String>,
+    pub best_payout_address: Option<String>,
+    pub best_submitted_worker: Option<String>,
+    pub best_submitted_payout_address: Option<String>,
+    pub best_accepted_worker: Option<String>,
+    pub best_candidate_worker: Option<String>,
+    pub share_count: i64,
+    pub accepted_count: i64,
+    pub stale_count: i64,
+    pub duplicate_count: i64,
+    pub avg_pool_hashrate: Option<f64>,
+    pub template_key: String,
+    pub job_id: String,
+    pub network_difficulty: f64,
+    pub in_progress: bool,
+    pub current_template_age_secs: Option<i64>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<BlockWindowSnapshot> for BlockWindowRecord {
+    fn from(snapshot: BlockWindowSnapshot) -> Self {
+        Self {
+            id: snapshot.id,
+            height: snapshot.height as i64,
+            prevhash: snapshot.prevhash,
+            block_hash: snapshot.block_hash,
+            started_at: snapshot.started_at,
+            ended_at: snapshot.ended_at,
+            duration_secs: snapshot.duration_secs,
+            external_pool: snapshot.external_pool,
+            tx_count: snapshot.tx_count as i64,
+            fee_rate_sat_vb: snapshot.fee_rate_sat_vb,
+            best_submitted_difficulty: snapshot.best_submitted_difficulty,
+            best_accepted_difficulty: snapshot.best_accepted_difficulty,
+            best_block_candidate_difficulty: snapshot.best_block_candidate_difficulty,
+            best_worker: snapshot.best_worker,
+            best_payout_address: snapshot.best_payout_address,
+            best_submitted_worker: snapshot.best_submitted_worker,
+            best_submitted_payout_address: snapshot.best_submitted_payout_address,
+            best_accepted_worker: snapshot.best_accepted_worker,
+            best_candidate_worker: snapshot.best_candidate_worker,
+            share_count: snapshot.share_count as i64,
+            accepted_count: snapshot.accepted_count as i64,
+            stale_count: snapshot.stale_count as i64,
+            duplicate_count: snapshot.duplicate_count as i64,
+            avg_pool_hashrate: snapshot.avg_pool_hashrate,
+            template_key: snapshot.template_key,
+            job_id: snapshot.job_id,
+            network_difficulty: snapshot.network_difficulty,
+            in_progress: snapshot.in_progress,
+            current_template_age_secs: snapshot.current_template_age_secs.map(|v| v as i64),
+            created_at: snapshot.created_at,
+            updated_at: snapshot.updated_at,
+        }
+    }
+}
+
+impl From<BlockWindowRecord> for BlockWindowRow {
+    fn from(record: BlockWindowRecord) -> Self {
+        Self {
+            id: record.id,
+            height: record.height,
+            prevhash: record.prevhash,
+            block_hash: record.block_hash,
+            started_at: record.started_at.to_rfc3339(),
+            ended_at: record.ended_at.map(|dt| dt.to_rfc3339()),
+            duration_secs: record.duration_secs,
+            external_pool: record.external_pool,
+            tx_count: record.tx_count,
+            fee_rate_sat_vb: record.fee_rate_sat_vb,
+            best_submitted_difficulty: record.best_submitted_difficulty,
+            best_accepted_difficulty: record.best_accepted_difficulty,
+            best_block_candidate_difficulty: record.best_block_candidate_difficulty,
+            best_worker: record.best_worker,
+            best_payout_address: record.best_payout_address,
+            best_submitted_worker: record.best_submitted_worker,
+            best_submitted_payout_address: record.best_submitted_payout_address,
+            best_accepted_worker: record.best_accepted_worker,
+            best_candidate_worker: record.best_candidate_worker,
+            share_count: record.share_count,
+            accepted_count: record.accepted_count,
+            stale_count: record.stale_count,
+            duplicate_count: record.duplicate_count,
+            avg_pool_hashrate: record.avg_pool_hashrate,
+            template_key: record.template_key,
+            job_id: record.job_id,
+            network_difficulty: record.network_difficulty,
+            in_progress: record.in_progress,
+            current_template_age_secs: record.current_template_age_secs,
+            created_at: record.created_at.to_rfc3339(),
+            updated_at: record.updated_at.to_rfc3339(),
+        }
+    }
+}
+
+impl From<BlockWindowSnapshot> for BlockWindowRow {
+    fn from(snapshot: BlockWindowSnapshot) -> Self {
+        BlockWindowRecord::from(snapshot).into()
+    }
 }
 
 impl SqliteStore {
@@ -166,6 +320,46 @@ impl SqliteStore {
 
         sqlx::query(
             r#"
+            CREATE TABLE IF NOT EXISTS block_windows (
+                id TEXT PRIMARY KEY,
+                height INTEGER NOT NULL,
+                prevhash TEXT NOT NULL,
+                block_hash TEXT,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                duration_secs INTEGER,
+                external_pool TEXT,
+                tx_count INTEGER NOT NULL DEFAULT 0,
+                fee_rate_sat_vb REAL,
+                best_submitted_difficulty REAL NOT NULL DEFAULT 0,
+                best_accepted_difficulty REAL NOT NULL DEFAULT 0,
+                best_block_candidate_difficulty REAL NOT NULL DEFAULT 0,
+                best_worker TEXT,
+                best_payout_address TEXT,
+                best_submitted_worker TEXT,
+                best_submitted_payout_address TEXT,
+                best_accepted_worker TEXT,
+                best_candidate_worker TEXT,
+                share_count INTEGER NOT NULL DEFAULT 0,
+                accepted_count INTEGER NOT NULL DEFAULT 0,
+                stale_count INTEGER NOT NULL DEFAULT 0,
+                duplicate_count INTEGER NOT NULL DEFAULT 0,
+                avg_pool_hashrate REAL,
+                template_key TEXT NOT NULL,
+                job_id TEXT NOT NULL,
+                network_difficulty REAL NOT NULL DEFAULT 0,
+                in_progress INTEGER NOT NULL DEFAULT 0,
+                current_template_age_secs INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            "#,
+        )
+        .execute(pool.as_ref())
+        .await?;
+
+        sqlx::query(
+            r#"
             CREATE TABLE IF NOT EXISTS block_candidates (
                 id TEXT PRIMARY KEY,
                 worker TEXT NOT NULL,
@@ -216,6 +410,15 @@ impl SqliteStore {
             r#"
             CREATE INDEX IF NOT EXISTS idx_blocks_created
             ON blocks(created_at DESC);
+            "#,
+        )
+        .execute(pool.as_ref())
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_block_windows_started
+            ON block_windows(started_at DESC);
             "#,
         )
         .execute(pool.as_ref())
@@ -639,6 +842,158 @@ impl SqliteStore {
         Ok(())
     }
 
+    pub async fn upsert_block_window(&self, record: BlockWindowRecord) -> anyhow::Result<()> {
+        let Some(pool) = &self.pool else {
+            return Ok(());
+        };
+
+        sqlx::query(
+            r#"
+            INSERT INTO block_windows (
+                id, height, prevhash, block_hash, started_at, ended_at, duration_secs,
+                external_pool, tx_count, fee_rate_sat_vb,
+                best_submitted_difficulty, best_accepted_difficulty, best_block_candidate_difficulty,
+                best_worker, best_payout_address, best_submitted_worker, best_submitted_payout_address,
+                best_accepted_worker, best_candidate_worker,
+                share_count, accepted_count, stale_count, duplicate_count,
+                avg_pool_hashrate, template_key, job_id, network_difficulty,
+                in_progress, current_template_age_secs, created_at, updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31)
+            ON CONFLICT(id) DO UPDATE SET
+                height = excluded.height,
+                prevhash = excluded.prevhash,
+                block_hash = excluded.block_hash,
+                started_at = excluded.started_at,
+                ended_at = excluded.ended_at,
+                duration_secs = excluded.duration_secs,
+                external_pool = excluded.external_pool,
+                tx_count = excluded.tx_count,
+                fee_rate_sat_vb = excluded.fee_rate_sat_vb,
+                best_submitted_difficulty = excluded.best_submitted_difficulty,
+                best_accepted_difficulty = excluded.best_accepted_difficulty,
+                best_block_candidate_difficulty = excluded.best_block_candidate_difficulty,
+                best_worker = excluded.best_worker,
+                best_payout_address = excluded.best_payout_address,
+                best_submitted_worker = excluded.best_submitted_worker,
+                best_submitted_payout_address = excluded.best_submitted_payout_address,
+                best_accepted_worker = excluded.best_accepted_worker,
+                best_candidate_worker = excluded.best_candidate_worker,
+                share_count = excluded.share_count,
+                accepted_count = excluded.accepted_count,
+                stale_count = excluded.stale_count,
+                duplicate_count = excluded.duplicate_count,
+                avg_pool_hashrate = excluded.avg_pool_hashrate,
+                template_key = excluded.template_key,
+                job_id = excluded.job_id,
+                network_difficulty = excluded.network_difficulty,
+                in_progress = excluded.in_progress,
+                current_template_age_secs = excluded.current_template_age_secs,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(record.id)
+        .bind(record.height)
+        .bind(record.prevhash)
+        .bind(record.block_hash)
+        .bind(record.started_at.to_rfc3339())
+        .bind(record.ended_at.map(|dt| dt.to_rfc3339()))
+        .bind(record.duration_secs)
+        .bind(record.external_pool)
+        .bind(record.tx_count)
+        .bind(record.fee_rate_sat_vb)
+        .bind(record.best_submitted_difficulty)
+        .bind(record.best_accepted_difficulty)
+        .bind(record.best_block_candidate_difficulty)
+        .bind(record.best_worker)
+        .bind(record.best_payout_address)
+        .bind(record.best_submitted_worker)
+        .bind(record.best_submitted_payout_address)
+        .bind(record.best_accepted_worker)
+        .bind(record.best_candidate_worker)
+        .bind(record.share_count)
+        .bind(record.accepted_count)
+        .bind(record.stale_count)
+        .bind(record.duplicate_count)
+        .bind(record.avg_pool_hashrate)
+        .bind(record.template_key)
+        .bind(record.job_id)
+        .bind(record.network_difficulty)
+        .bind(record.in_progress)
+        .bind(record.current_template_age_secs)
+        .bind(record.created_at.to_rfc3339())
+        .bind(record.updated_at.to_rfc3339())
+        .execute(pool.as_ref())
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn fetch_block_windows(&self, limit: i64) -> anyhow::Result<Vec<BlockWindowRow>> {
+        let Some(pool) = &self.pool else {
+            return Ok(vec![]);
+        };
+
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id, height, prevhash, block_hash, started_at, ended_at, duration_secs,
+                external_pool, tx_count, fee_rate_sat_vb,
+                best_submitted_difficulty, best_accepted_difficulty, best_block_candidate_difficulty,
+                best_worker, best_payout_address, best_submitted_worker, best_submitted_payout_address,
+                best_accepted_worker, best_candidate_worker,
+                share_count, accepted_count, stale_count, duplicate_count,
+                avg_pool_hashrate, template_key, job_id, network_difficulty,
+                in_progress, current_template_age_secs, created_at, updated_at
+            FROM block_windows
+            ORDER BY started_at DESC
+            LIMIT ?1
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(pool.as_ref())
+        .await?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            out.push(BlockWindowRow {
+                id: row.get("id"),
+                height: row.get("height"),
+                prevhash: row.get("prevhash"),
+                block_hash: row.try_get("block_hash")?,
+                started_at: row.get("started_at"),
+                ended_at: row.try_get("ended_at")?,
+                duration_secs: row.try_get("duration_secs")?,
+                external_pool: row.try_get("external_pool")?,
+                tx_count: row.get("tx_count"),
+                fee_rate_sat_vb: row.try_get("fee_rate_sat_vb")?,
+                best_submitted_difficulty: row.get("best_submitted_difficulty"),
+                best_accepted_difficulty: row.get("best_accepted_difficulty"),
+                best_block_candidate_difficulty: row.get("best_block_candidate_difficulty"),
+                best_worker: row.try_get("best_worker")?,
+                best_payout_address: row.try_get("best_payout_address")?,
+                best_submitted_worker: row.try_get("best_submitted_worker")?,
+                best_submitted_payout_address: row.try_get("best_submitted_payout_address")?,
+                best_accepted_worker: row.try_get("best_accepted_worker")?,
+                best_candidate_worker: row.try_get("best_candidate_worker")?,
+                share_count: row.get("share_count"),
+                accepted_count: row.get("accepted_count"),
+                stale_count: row.get("stale_count"),
+                duplicate_count: row.get("duplicate_count"),
+                avg_pool_hashrate: row.try_get("avg_pool_hashrate")?,
+                template_key: row.get("template_key"),
+                job_id: row.get("job_id"),
+                network_difficulty: row.get("network_difficulty"),
+                in_progress: row.get::<i64, _>("in_progress") != 0,
+                current_template_age_secs: row.try_get("current_template_age_secs")?,
+                created_at: row.get("created_at"),
+                updated_at: row.get("updated_at"),
+            });
+        }
+        Ok(out)
+    }
+
     pub async fn insert_share(&self, record: ShareRecord) -> anyhow::Result<()> {
         let Some(pool) = &self.pool else {
             return Ok(());
@@ -998,5 +1353,92 @@ mod tests {
             fetched.as_ref().and_then(|row| row.full_block_hex.as_deref()),
             Some("fullblock")
         );
+    }
+
+    #[tokio::test]
+    async fn block_window_round_trip_orders_newest_first_and_includes_current() {
+        let store = SqliteStore::connect(Some("sqlite::memory:"))
+            .await
+            .expect("memory sqlite store");
+
+        let now = Utc::now();
+        let older = BlockWindowRecord {
+            id: Uuid::new_v4().to_string(),
+            height: 100,
+            prevhash: "prev-older".to_string(),
+            block_hash: Some("block-older".to_string()),
+            started_at: now - chrono::Duration::minutes(20),
+            ended_at: Some(now - chrono::Duration::minutes(10)),
+            duration_secs: Some(600),
+            external_pool: Some("F2Pool".to_string()),
+            tx_count: 100,
+            fee_rate_sat_vb: Some(2.5),
+            best_submitted_difficulty: 10.0,
+            best_accepted_difficulty: 9.0,
+            best_block_candidate_difficulty: 0.0,
+            best_worker: Some("miner-older".to_string()),
+            best_payout_address: Some("bc1qolder".to_string()),
+            best_submitted_worker: Some("miner-older".to_string()),
+            best_submitted_payout_address: Some("bc1qolder".to_string()),
+            best_accepted_worker: Some("miner-older".to_string()),
+            best_candidate_worker: None,
+            share_count: 12,
+            accepted_count: 11,
+            stale_count: 1,
+            duplicate_count: 0,
+            avg_pool_hashrate: Some(111.0),
+            template_key: "tmpl-older".to_string(),
+            job_id: "job-older".to_string(),
+            network_difficulty: 123.0,
+            in_progress: false,
+            current_template_age_secs: None,
+            created_at: now - chrono::Duration::minutes(20),
+            updated_at: now - chrono::Duration::minutes(10),
+        };
+        let current = BlockWindowRecord {
+            id: Uuid::new_v4().to_string(),
+            height: 101,
+            prevhash: "prev-current".to_string(),
+            block_hash: None,
+            started_at: now - chrono::Duration::minutes(1),
+            ended_at: None,
+            duration_secs: None,
+            external_pool: None,
+            tx_count: 101,
+            fee_rate_sat_vb: Some(3.5),
+            best_submitted_difficulty: 20.0,
+            best_accepted_difficulty: 20.0,
+            best_block_candidate_difficulty: 0.0,
+            best_worker: Some("miner-current".to_string()),
+            best_payout_address: Some("bc1qcurrent".to_string()),
+            best_submitted_worker: Some("miner-current".to_string()),
+            best_submitted_payout_address: Some("bc1qcurrent".to_string()),
+            best_accepted_worker: Some("miner-current".to_string()),
+            best_candidate_worker: None,
+            share_count: 2,
+            accepted_count: 2,
+            stale_count: 0,
+            duplicate_count: 0,
+            avg_pool_hashrate: Some(222.0),
+            template_key: "tmpl-current".to_string(),
+            job_id: "job-current".to_string(),
+            network_difficulty: 456.0,
+            in_progress: true,
+            current_template_age_secs: Some(8),
+            created_at: now - chrono::Duration::minutes(1),
+            updated_at: now,
+        };
+
+        store.upsert_block_window(older.clone()).await.expect("insert older");
+        store.upsert_block_window(current.clone()).await.expect("insert current");
+
+        let rows = store.fetch_block_windows(10).await.expect("fetch windows");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].height, 101);
+        assert_eq!(rows[0].in_progress, true);
+        assert_eq!(rows[0].block_hash, None);
+        assert_eq!(rows[1].height, 100);
+        assert_eq!(rows[1].best_worker.as_deref(), Some("miner-older"));
+        assert_eq!(rows[1].best_payout_address.as_deref(), Some("bc1qolder"));
     }
 }

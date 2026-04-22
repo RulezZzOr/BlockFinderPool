@@ -144,6 +144,40 @@ export type BlockCandidateRow = {
   rpc_error: string | null;
 };
 
+export type BlockWindowRow = {
+  id: string;
+  height: number;
+  prevhash: string;
+  blockHash: string | null;
+  startedAt: string;
+  endedAt: string | null;
+  durationSecs: number | null;
+  externalPool: string | null;
+  txCount: number;
+  feeRateSatVb: number | null;
+  bestSubmittedDifficulty: number;
+  bestAcceptedDifficulty: number;
+  bestBlockCandidateDifficulty: number;
+  bestWorker: string | null;
+  bestPayoutAddress: string | null;
+  bestSubmittedWorker: string | null;
+  bestSubmittedPayoutAddress: string | null;
+  bestAcceptedWorker: string | null;
+  bestCandidateWorker: string | null;
+  shareCount: number;
+  acceptedCount: number;
+  staleCount: number;
+  duplicateCount: number;
+  avgPoolHashrate: number | null;
+  templateKey: string;
+  jobId: string;
+  networkDifficulty: number;
+  inProgress: boolean;
+  currentTemplateAgeSecs: number | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type PublicBlockRow = {
   height: number;
   hash: string;
@@ -278,6 +312,14 @@ export const fetchBlocks = async (): Promise<BlockRow[]> => {
     for (const b of ([] as BlockRow[]).concat(...parts))
       uniq.set(`${b.height}:${b.hash}`, b);
     return Array.from(uniq.values()).sort((a, b) => b.height - a.height);
+  } catch {
+    return [];
+  }
+};
+
+export const fetchBlockWindows = async (limit = 10): Promise<BlockWindowRow[]> => {
+  try {
+    return await apiGet<BlockWindowRow[]>(`/block-windows?limit=${limit}`);
   } catch {
     return [];
   }

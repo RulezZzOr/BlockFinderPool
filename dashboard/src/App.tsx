@@ -1,15 +1,17 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import {
-  PoolStats, Miner, NetworkInfo, BlockRow, PublicBlockRow, BlockCandidateRow, HashrateResponse,
+  PoolStats, Miner, NetworkInfo, BlockRow, PublicBlockRow, BlockCandidateRow, BlockWindowRow, HashrateResponse,
   fetchPool, fetchMiners, fetchHashrate,
   fetchBlocks,
   fetchBlockCandidates,
+  fetchBlockWindows,
   fetchPublicBlocks,
   fmtHr, fmtDiff, fmtNetHash, fmtUptime, fmtBlockInterval, timeAgo, shortWorker, shortAddress, getFirmwareLabel,
   blockSubsidy, fmtBtc,
 } from "./api";
 import BlocksTable from "./components/BlocksTable";
 import BlockCandidatesTable from "./components/BlockCandidatesTable";
+import BlockWindowsTable from "./components/BlockWindowsTable";
 import PublicBlocksTable from "./components/PublicBlocksTable";
 import "./styles.css";
 
@@ -1420,11 +1422,13 @@ export default function App() {
   const [miners, setMiners] = useState<Miner[]>([]);
   const [blocks, setBlocks] = useState<BlockRow[]>([]);
   const [blockCandidates, setBlockCandidates] = useState<BlockCandidateRow[]>([]);
+  const [blockWindows, setBlockWindows] = useState<BlockWindowRow[]>([]);
   const [publicBlocks, setPublicBlocks] = useState<PublicBlockRow[]>([]);
   const [hashrate, setHashrate] = useState<HashrateResponse | null>(null);
   const [network, setNetwork] = useState<NetworkInfo | null>(null);
   const [live, setLive] = useState(false);
   const [celebrating, setCelebrating] = useState(false);
+  const [compactWindows, setCompactWindows] = useState(false);
 
   const prevBlocksFound    = useRef<number>(0);
   const prevSubmitAccepted = useRef<number>(0);
@@ -1445,11 +1449,12 @@ export default function App() {
       // getmininginfo RPC.
       // [Fix 3] Use allSettled so a flaky /miners response does NOT flip
       // the dashboard OFFLINE; pool health drives the LIVE indicator.
-      const [poolResult, minersResult, blocksResult, blockCandidatesResult, hashrateResult] = await Promise.allSettled([
+      const [poolResult, minersResult, blocksResult, blockCandidatesResult, blockWindowsResult, hashrateResult] = await Promise.allSettled([
         fetchPool(),
         fetchMiners(),
         fetchBlocks(),
         fetchBlockCandidates(),
+        fetchBlockWindows(10),
         fetchHashrate(),
       ]);
 
@@ -1500,6 +1505,10 @@ export default function App() {
         setBlockCandidates(blockCandidatesResult.value);
       }
 
+      if (blockWindowsResult.status === "fulfilled") {
+        setBlockWindows(blockWindowsResult.value);
+      }
+
       if (hashrateResult.status === "fulfilled") {
         setHashrate(hashrateResult.value);
       }
@@ -1545,6 +1554,17 @@ export default function App() {
         <BlockCandidatesTable candidates={blockCandidates} />
         <PublicBlocksTable blocks={publicBlocks} />
       </div>
+
+      <div className="bh-section-title" id="bh-windows">
+        <span>Recent Block Windows</span>
+        <div className="bh-section-line" />
+      </div>
+      <BlockWindowsTable
+        windows={blockWindows}
+        publicBlocks={publicBlocks}
+        compact={compactWindows}
+        onToggleCompact={() => setCompactWindows((value) => !value)}
+      />
 
       {/* Row 1: Bitcoin Core | Core Visual | Share Flow */}
       <div className="bh-section-title" id="bh-core">

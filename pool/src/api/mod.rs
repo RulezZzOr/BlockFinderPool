@@ -1,6 +1,7 @@
 use std::sync::Arc;
+use std::collections::HashSet;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
@@ -16,7 +17,7 @@ use crate::build_info::{self, BuildInfo};
 use crate::config::Config;
 use crate::metrics::{MetricsStore, ShareEvent};
 use crate::rpc::RpcClient;
-use crate::storage::{BlockCandidateRow as SqlBlockCandidateRow, SqliteStore};
+use crate::storage::{BlockCandidateRow as SqlBlockCandidateRow, BlockWindowRow as SqlBlockWindowRow, SqliteStore};
 use crate::template::{JobTemplate, TemplateEngine};
 
 #[derive(Clone)]
@@ -70,6 +71,7 @@ impl ApiServer {
             .route("/shares", get(shares))
             .route("/hashrate", get(hashrate))
             .route("/blocks", get(blocks))
+            .route("/block-windows", get(block_windows))
             .route("/block-candidates", get(block_candidates))
             .route("/block-candidates/:id", get(block_candidate_detail))
             .route("/public-blocks", get(public_blocks))
@@ -247,6 +249,53 @@ async fn blocks(State(state): State<ApiState>) -> impl IntoResponse {
         })
         .collect::<Vec<_>>();
     Json(blocks)
+}
+
+#[derive(Deserialize)]
+struct WindowQuery {
+    limit: Option<usize>,
+}
+
+async fn block_windows(
+    Query(query): Query<WindowQuery>,
+    State(state): State<ApiState>,
+) -> impl IntoResponse {
+    let limit = query.limit.unwrap_or(10).clamp(1, 50);
+    let current_template_age_secs = state.template_engine.template_age_secs();
+    let current = state
+        .metrics
+        .current_block_window_snapshot(current_template_age_secs)
+        .await;
+    let current = current.into();
+    let finalized_pending = state
+        .metrics
+        .finalized_block_windows_snapshot()
+        .await
+        .into_iter()
+        .map(SqlBlockWindowRow::from)
+        .collect::<Vec<_>>();
+    let persisted_limit = limit.saturating_sub(1) as i64;
+    let persisted = match state.sqlite.fetch_block_windows(persisted_limit).await {
+        Ok(rows) => rows,
+        Err(_) => vec![],
+    };
+    let rows = merge_block_windows(current, finalized_pending, persisted, limit);
+    Json(rows)
+}
+
+fn merge_block_windows(
+    current: SqlBlockWindowRow,
+    finalized_pending: Vec<SqlBlockWindowRow>,
+    persisted: Vec<SqlBlockWindowRow>,
+    limit: usize,
+) -> Vec<SqlBlockWindowRow> {
+    let mut rows = Vec::<SqlBlockWindowRow>::new();
+    rows.push(current);
+    rows.extend(finalized_pending.into_iter().rev());
+    let seen: HashSet<String> = rows.iter().map(|row| row.id.clone()).collect();
+    rows.extend(persisted.into_iter().filter(|row| !seen.contains(&row.id)));
+    rows.truncate(limit);
+    rows
 }
 
 async fn block_candidates(State(state): State<ApiState>) -> impl IntoResponse {
@@ -1061,6 +1110,93 @@ mod tests {
         assert_eq!(value["submitblock_result"], Value::from("submitted"));
         assert_eq!(value["submitblock_rpc_latency_ms"], Value::from(17));
         assert_eq!(value["rpc_error"], Value::from("rpc failed"));
+    }
+
+    #[test]
+    fn block_window_row_serializes_current_and_history_fields() {
+        let window = SqlBlockWindowRow {
+            id: "window-1".to_string(),
+            height: 123,
+            prevhash: "prev".to_string(),
+            block_hash: None,
+            started_at: "2026-04-22T00:00:00Z".to_string(),
+            ended_at: None,
+            duration_secs: None,
+            external_pool: Some("F2Pool".to_string()),
+            tx_count: 1234,
+            fee_rate_sat_vb: Some(4.2),
+            best_submitted_difficulty: 12.0,
+            best_accepted_difficulty: 11.0,
+            best_block_candidate_difficulty: 0.0,
+            best_worker: Some("worker-a".to_string()),
+            best_payout_address: Some("bc1qbest".to_string()),
+            best_submitted_worker: Some("worker-a".to_string()),
+            best_submitted_payout_address: Some("bc1qbest".to_string()),
+            best_accepted_worker: Some("worker-a".to_string()),
+            best_candidate_worker: None,
+            share_count: 3,
+            accepted_count: 2,
+            stale_count: 1,
+            duplicate_count: 0,
+            avg_pool_hashrate: Some(111.0),
+            template_key: "tmpl".to_string(),
+            job_id: "job".to_string(),
+            network_difficulty: 99.0,
+            in_progress: true,
+            current_template_age_secs: Some(7),
+            created_at: "2026-04-22T00:00:00Z".to_string(),
+            updated_at: "2026-04-22T00:00:00Z".to_string(),
+        };
+
+        let value = serde_json::to_value(window).expect("window serializes");
+        assert_eq!(value["inProgress"], Value::from(true));
+        assert_eq!(value["bestSubmittedDifficulty"], Value::from(12.0));
+        assert_eq!(value["bestWorker"], Value::from("worker-a"));
+    }
+
+    #[test]
+    fn merge_block_windows_returns_current_first_then_newest_history() {
+        let current = SqlBlockWindowRow {
+            id: "current".to_string(),
+            height: 200,
+            prevhash: "prev-current".to_string(),
+            block_hash: None,
+            started_at: "2026-04-22T00:00:00Z".to_string(),
+            ended_at: None,
+            duration_secs: None,
+            external_pool: None,
+            tx_count: 1,
+            fee_rate_sat_vb: None,
+            best_submitted_difficulty: 20.0,
+            best_accepted_difficulty: 20.0,
+            best_block_candidate_difficulty: 0.0,
+            best_worker: Some("worker-current".to_string()),
+            best_payout_address: Some("bc1qcurrent".to_string()),
+            best_submitted_worker: Some("worker-current".to_string()),
+            best_submitted_payout_address: Some("bc1qcurrent".to_string()),
+            best_accepted_worker: Some("worker-current".to_string()),
+            best_candidate_worker: None,
+            share_count: 1,
+            accepted_count: 1,
+            stale_count: 0,
+            duplicate_count: 0,
+            avg_pool_hashrate: Some(100.0),
+            template_key: "tmpl-current".to_string(),
+            job_id: "job-current".to_string(),
+            network_difficulty: 1.0,
+            in_progress: true,
+            current_template_age_secs: Some(1),
+            created_at: "2026-04-22T00:00:00Z".to_string(),
+            updated_at: "2026-04-22T00:00:00Z".to_string(),
+        };
+        let finalized_old = SqlBlockWindowRow { id: "old".to_string(), height: 198, prevhash: "p1".to_string(), block_hash: Some("h1".to_string()), started_at: "2026-04-21T00:00:00Z".to_string(), ended_at: Some("2026-04-21T00:10:00Z".to_string()), duration_secs: Some(600), external_pool: None, tx_count: 2, fee_rate_sat_vb: None, best_submitted_difficulty: 1.0, best_accepted_difficulty: 1.0, best_block_candidate_difficulty: 0.0, best_worker: Some("w1".to_string()), best_payout_address: None, best_submitted_worker: Some("w1".to_string()), best_submitted_payout_address: None, best_accepted_worker: Some("w1".to_string()), best_candidate_worker: None, share_count: 1, accepted_count: 1, stale_count: 0, duplicate_count: 0, avg_pool_hashrate: None, template_key: "t1".to_string(), job_id: "j1".to_string(), network_difficulty: 1.0, in_progress: false, current_template_age_secs: None, created_at: "2026-04-21T00:00:00Z".to_string(), updated_at: "2026-04-21T00:10:00Z".to_string() };
+        let finalized_new = SqlBlockWindowRow { id: "new".to_string(), height: 199, prevhash: "p2".to_string(), block_hash: Some("h2".to_string()), started_at: "2026-04-21T01:00:00Z".to_string(), ended_at: Some("2026-04-21T01:10:00Z".to_string()), duration_secs: Some(600), external_pool: None, tx_count: 2, fee_rate_sat_vb: None, best_submitted_difficulty: 2.0, best_accepted_difficulty: 2.0, best_block_candidate_difficulty: 0.0, best_worker: Some("w2".to_string()), best_payout_address: None, best_submitted_worker: Some("w2".to_string()), best_submitted_payout_address: None, best_accepted_worker: Some("w2".to_string()), best_candidate_worker: None, share_count: 2, accepted_count: 2, stale_count: 0, duplicate_count: 0, avg_pool_hashrate: None, template_key: "t2".to_string(), job_id: "j2".to_string(), network_difficulty: 2.0, in_progress: false, current_template_age_secs: None, created_at: "2026-04-21T01:00:00Z".to_string(), updated_at: "2026-04-21T01:10:00Z".to_string() };
+
+        let rows = merge_block_windows(current, vec![finalized_old, finalized_new], vec![], 10);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].id, "current");
+        assert_eq!(rows[1].id, "new");
+        assert_eq!(rows[2].id, "old");
     }
 }
 
