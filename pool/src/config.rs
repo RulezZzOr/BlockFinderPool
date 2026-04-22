@@ -51,6 +51,7 @@ pub struct Config {
     pub vardiff_enabled: bool,
     pub job_refresh_ms: u64,
     pub template_poll_ms: u64,
+    pub template_max_age_secs: u64,
     // notify_throttle_ms removed — replaced by token bucket (NOTIFY_BUCKET_CAPACITY /
     // NOTIFY_BUCKET_REFILL_MS). clean_jobs=true always bypasses the bucket entirely.
 
@@ -77,8 +78,11 @@ pub struct Config {
     pub database_url: Option<String>,
 
     // Performance / persistence toggles (solo max-perf defaults).
+    pub solo_mode: bool,
     pub persist_shares: bool,
     pub persist_blocks: bool,
+    pub persist_best: bool,
+    pub best_persist_interval_secs: u64,
 
     /// Number of accepted shares per session for which SHARE_PROOF is logged.
     /// Default 0 = disabled.  Set SHARE_PROOF_SHARES=200 to enable for debugging.
@@ -160,11 +164,11 @@ impl Config {
             .context("EXTRANONCE2_SIZE must be a number")?;
 
         let min_difficulty: f64 = env::var("MIN_DIFFICULTY")
-            .unwrap_or_else(|_| "16384".to_string())
+            .unwrap_or_else(|_| "8192".to_string())
             .parse()
             .context("MIN_DIFFICULTY must be a number")?;
         let max_difficulty: f64 = env::var("MAX_DIFFICULTY")
-            .unwrap_or_else(|_| "4194304".to_string())
+            .unwrap_or_else(|_| "262144".to_string())
             .parse()
             .context("MAX_DIFFICULTY must be a number")?;
         let start_difficulty: f64 = env::var("STRATUM_START_DIFFICULTY")
@@ -173,23 +177,27 @@ impl Config {
             .unwrap_or(min_difficulty)
             .clamp(min_difficulty, max_difficulty);
         let target_share_time_secs = env::var("TARGET_SHARE_TIME_SECS")
-            .unwrap_or_else(|_| "60".to_string())
+            .unwrap_or_else(|_| "20".to_string())
             .parse()
             .context("TARGET_SHARE_TIME_SECS must be a number")?;
         let vardiff_retarget_time_secs = env::var("VARDIFF_RETARGET_SECS")
-            .unwrap_or_else(|_| "90".to_string())
+            .unwrap_or_else(|_| "45".to_string())
             .parse()
             .context("VARDIFF_RETARGET_SECS must be a number")?;
                 let vardiff_enabled = parse_bool("VARDIFF_ENABLED", true);
 
         let job_refresh_ms = env::var("JOB_REFRESH_MS")
-            .unwrap_or_else(|_| "60000".to_string())
+            .unwrap_or_else(|_| "30000".to_string())
             .parse()
             .context("JOB_REFRESH_MS must be a number")?;
         let template_poll_ms = env::var("TEMPLATE_POLL_MS")
-            .unwrap_or_else(|_| "10000".to_string())
+            .unwrap_or_else(|_| "30000".to_string())
             .parse()
             .context("TEMPLATE_POLL_MS must be a number")?;
+        let template_max_age_secs = env::var("TEMPLATE_MAX_AGE_SECS")
+            .unwrap_or_else(|_| "30".to_string())
+            .parse()
+            .context("TEMPLATE_MAX_AGE_SECS must be a number")?;
         let notify_bucket_capacity: f64 = env::var("NOTIFY_BUCKET_CAPACITY")
             .unwrap_or_else(|_| "2".to_string())
             .parse()
@@ -221,11 +229,17 @@ impl Config {
                 let redis_url = opt_trimmed("REDIS_URL");
         let database_url = opt_trimmed("DATABASE_URL");
 
+        let solo_mode = parse_bool("SOLO_MODE", true);
         // In solo mode, persisting every share can become the bottleneck at high hashrate.
         // Default to false unless explicitly enabled.
-                let persist_shares = parse_bool("PERSIST_SHARES", false);
+        let persist_shares = parse_bool("PERSIST_SHARES", false);
         // Persisting blocks is cheap and usually desirable.
-                let persist_blocks = parse_bool("PERSIST_BLOCKS", true);
+        let persist_blocks = parse_bool("PERSIST_BLOCKS", true);
+        let persist_best = parse_bool("PERSIST_BEST", true);
+        let best_persist_interval_secs = env::var("BEST_PERSIST_INTERVAL_SECS")
+            .unwrap_or_else(|_| "10".to_string())
+            .parse()
+            .context("BEST_PERSIST_INTERVAL_SECS must be a number")?;
 
         let share_proof_limit: u16 = env::var("SHARE_PROOF_SHARES")
             .unwrap_or_else(|_| "0".to_string())
@@ -258,6 +272,7 @@ impl Config {
             vardiff_enabled,
             job_refresh_ms,
             template_poll_ms,
+            template_max_age_secs,
             notify_bucket_capacity,
             notify_bucket_refill_ms,
             zmq_debounce_ms,
@@ -267,8 +282,11 @@ impl Config {
             redis_url,
             database_url,
 
+            solo_mode,
             persist_shares,
             persist_blocks,
+            persist_best,
+            best_persist_interval_secs,
             share_proof_limit,
         })
     }

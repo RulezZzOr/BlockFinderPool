@@ -29,6 +29,46 @@ export type PoolStats = {
   zmqTxDebounced: number;
   zmqTxPostBlockSuppressed: number;
   staleRatio: number;
+  submitRttP50Ms: number;
+  submitRttP95Ms: number;
+  submitRttP99Ms: number;
+  submitRttMaxMs: number;
+  submitRttOver50MsCount: number;
+  submitRttOver100MsCount: number;
+  globalBestSubmittedDifficulty: number;
+  globalBestAcceptedDifficulty: number;
+  globalBestBlockCandidateDifficulty: number;
+  publicPoolStyleBest: number;
+  cgminerStyleBest: number;
+  rawBest: number;
+  acceptedBest: number;
+  currentBlockBestSubmittedDifficulty: number;
+  currentBlockBestAcceptedDifficulty: number;
+  currentBlockBestCandidateDifficulty: number;
+  previousBlockBestSubmittedDifficulty: number;
+  previousBlockBestAcceptedDifficulty: number;
+  previousBlockBestCandidateDifficulty: number;
+  templateMaxAgeSecs: number;
+  lastTemplateRefreshAt: string;
+  lastZmqBlockAt: string | null;
+  lastZmqTxAt: string | null;
+  currentTemplateAgeSecs: number | null;
+  templateAgeSecs: number | null;
+  templateStale: boolean;
+  zmqConnected: boolean;
+  lastCleanJobsNotifyAt: string | null;
+  templateRefreshFailures: number;
+  rpcHealthy: boolean;
+  currentBlockHeight: number;
+  currentBlockPrevhash: string;
+  currentBlockTemplateKey: string;
+  currentBlockJobId: string;
+  currentBlockCreatedAt: string;
+  previousBlockHeight: number;
+  previousBlockPrevhash: string;
+  previousBlockTemplateKey: string;
+  previousBlockJobId: string;
+  previousBlockCreatedAt: string | null;
   // Network info embedded in /pool to avoid a second getmininginfo RPC call.
   networkDifficulty: number;
   networkHashps: number;
@@ -39,6 +79,25 @@ export type Miner = {
   difficulty: number;
   best_difficulty: number;
   best_submitted_difficulty: number;
+  best_accepted_difficulty: number;
+  best_block_candidate_difficulty: number;
+  public_pool_style_best: number;
+  cgminer_style_best: number;
+  raw_best: number;
+  accepted_best: number;
+  session_best_submitted_difficulty: number;
+  session_best_accepted_difficulty: number;
+  worker_best_submitted_difficulty: number;
+  worker_best_accepted_difficulty: number;
+  current_block_best_submitted_difficulty: number;
+  current_block_best_accepted_difficulty: number;
+  current_block_best_candidate_difficulty: number;
+  previous_block_best_submitted_difficulty: number;
+  previous_block_best_accepted_difficulty: number;
+  previous_block_best_candidate_difficulty: number;
+  last_share_status: string | null;
+  last_share_difficulty: number;
+  last_share_at: string | null;
   shares: number;
   rejected: number;
   stale: number;
@@ -71,6 +130,18 @@ export type BlockRow = {
   found_by: string | null;
   status: string;
   created_at: string;
+};
+
+export type BlockCandidateRow = {
+  timestamp: string;
+  worker: string;
+  height: number;
+  block_hash: string;
+  submitted_difficulty: number;
+  network_difficulty: number;
+  submitblock_result: string;
+  submitblock_rpc_latency_ms: number;
+  rpc_error: string | null;
 };
 
 export type PublicBlockRow = {
@@ -192,6 +263,14 @@ export const fetchNetwork = async (): Promise<NetworkInfo | null> => {
   }
 };
 
+export const fetchHashrate = async (): Promise<HashrateResponse | null> => {
+  try {
+    return await apiGet<HashrateResponse>("/hashrate");
+  } catch {
+    return null;
+  }
+};
+
 export const fetchBlocks = async (): Promise<BlockRow[]> => {
   try {
     const parts = await apiGetAll<BlockRow[]>("/blocks");
@@ -199,6 +278,18 @@ export const fetchBlocks = async (): Promise<BlockRow[]> => {
     for (const b of ([] as BlockRow[]).concat(...parts))
       uniq.set(`${b.height}:${b.hash}`, b);
     return Array.from(uniq.values()).sort((a, b) => b.height - a.height);
+  } catch {
+    return [];
+  }
+};
+
+export const fetchBlockCandidates = async (): Promise<BlockCandidateRow[]> => {
+  try {
+    const parts = await apiGetAll<BlockCandidateRow[]>("/block-candidates");
+    const uniq = new Map<string, BlockCandidateRow>();
+    for (const c of ([] as BlockCandidateRow[]).concat(...parts))
+      uniq.set(`${c.timestamp}:${c.worker}:${c.block_hash}`, c);
+    return Array.from(uniq.values()).sort((a, b) => b.timestamp.localeCompare(a.timestamp));
   } catch {
     return [];
   }

@@ -46,7 +46,7 @@ use crate::config::Config;
 use crate::metrics::{MetricsStore, StaleReason};
 use crate::share::{share_target_le, validate_share, ShareSubmit};
 use std::collections::HashSet;
-use crate::storage::{RedisStore, ShareRecord, SqliteStore};
+use crate::storage::{BlockCandidateRecord, RedisStore, ShareRecord, SqliteStore};
 use crate::template::{build_coinbase2_for_payout, JobTemplate, TemplateEngine};
 use crate::vardiff::VardiffController;
 
@@ -195,6 +195,7 @@ impl StratumServer {
                         // Grace window stays active for STALE_GRACE_MS after this point.
                         guard.mark_jobs_stale_block();
                         guard.last_clean_jobs_time = Some(Utc::now());
+                        notify_counters.set_last_clean_jobs_notify_at(Utc::now());
                     }
                     let diff = guard.difficulty;
                     let extranonce1_bytes = guard.extranonce1_bytes.clone();
@@ -794,7 +795,7 @@ impl StratumServer {
 
 
         // Grab everything needed for validation with a short lock (no await-heavy work inside).
-        let (version_mask, session_job, last_notify, session_start, vardiff_enabled, session_worker, early_reply, stale_reason) = {
+        let (version_mask, session_job, last_notify, session_start, vardiff_enabled, session_worker, session_extranonce1, session_payout_address, early_reply, stale_reason) = {
             let guard = state.lock().await;
 
             if !guard.authorized {
@@ -810,6 +811,8 @@ impl StratumServer {
                     guard.session_start,
                     guard.vardiff_enabled,
                     guard.worker.clone(),
+                    guard.extranonce1.clone(),
+                    guard.session_payout_address.clone(),
                     Some(response.to_string()),
                     None::<StaleReason>,
                 )
@@ -822,6 +825,8 @@ impl StratumServer {
                         guard.session_start,
                         guard.vardiff_enabled,
                         guard.worker.clone(),
+                        guard.extranonce1.clone(),
+                        guard.session_payout_address.clone(),
                         None,
                         None::<StaleReason>,
                     ),
@@ -869,6 +874,8 @@ impl StratumServer {
                             guard.session_start,
                             guard.vardiff_enabled,
                             stale_worker,
+                            guard.extranonce1.clone(),
+                            guard.session_payout_address.clone(),
                             Some(response.to_string()),
                             Some(reason),
                         )
@@ -932,10 +939,21 @@ let job = session_job.job.clone();
                 "error": [20, "Version bits outside negotiated mask", null]
             });
             let _ = tx.send(resp.to_string()).await;
-            self.metrics.record_share(
-                &worker, session_job.difficulty, 0.0, false, false,
-                0, 0.0, 0, 0, false,
-            ).await;
+            self.metrics
+                .record_share_result(
+                    &worker,
+                    session_job.difficulty,
+                    0.0,
+                    false,
+                    false,
+                    0,
+                    0.0,
+                    0,
+                    0,
+                    false,
+                    false,
+                )
+                .await;
             return Ok(());
         }
 
@@ -996,30 +1014,8 @@ let job = session_job.job.clone();
             extranonce2_clean.clone(),
             u32::from_str_radix(version_key, 16).unwrap_or(0),
         );
-        {
-            let mut guard = state.lock().await;
-            if guard.submitted_hashes.contains(&dup_key) {
-                self.metrics.counters.inc_duplicate_share();
-                tracing::debug!(
-                    "duplicate share from {worker}: job={job_id} nonce={nonce_clean} ntime={ntime_clean} en2={extranonce2_clean} ver={version_key}"
-                );
-                let resp = json!({"id": request.id, "result": false,
-                                  "error": [22, "Duplicate share", null]});
-                let _ = tx.send(resp.to_string()).await;
-                self.metrics.record_share(&worker, session_job.difficulty, 0.0, false, false, 0, 0.0, 0, 0, false).await;
-                return Ok(());
-            }
-            // LRU eviction: remove the single oldest entry O(1) instead of clear().
-            // The guard window shrinks by exactly one entry, so all other recent keys
-            // remain protected.  No duplicate can slip through after eviction.
-            if guard.submitted_hashes.len() >= MAX_DUP_HASHES {
-                if let Some(oldest) = guard.submitted_hashes_order.pop_front() {
-                    guard.submitted_hashes.remove(&oldest);
-                }
-            }
-            guard.submitted_hashes.insert(dup_key.clone());
-            guard.submitted_hashes_order.push_back(dup_key);
-        }
+        // Duplicate detection is intentionally deferred until after the hash is
+        // computed so raw best-share tracking can record every validly parsed submit.
 
         // ── Heavy work: hash/merkle/header validation ─────────────────────────
         // Uses 256-bit integer comparison (exact) for both acceptance and block.
@@ -1075,6 +1071,142 @@ let job = session_job.job.clone();
             );
         }
 
+        // Raw best-share accounting is updated immediately after the hash is known,
+        // before duplicate rejection or any persistence work.
+        let is_stale_block = session_job.is_stale_block.load(Ordering::Acquire);
+        self.metrics
+            .record_raw_share(
+                &worker,
+                session_job.difficulty,
+                result.difficulty,
+                result.is_block,
+                is_stale_block,
+            )
+            .await;
+
+        // High-priority submitblock path: fire before duplicate/reject bookkeeping
+        // so a candidate never waits behind SQLite or dashboard code.
+        if result.accepted && result.is_block {
+            if is_stale_block {
+                tracing::warn!(
+                    "GRACE-BLOCK: worker={worker} found hash below target on stale-block job \
+                     height={} hash={} — NOT submitting (wrong prevhash, grace window)",
+                    job.height, result.hash_hex
+                );
+            } else if result.block_hex.is_some() {
+                let block_hex_owned   = result.block_hex.clone().unwrap();
+                let coinbase_hex_owned = result.coinbase_hex.clone().unwrap_or_default();
+                let block_hash        = result.hash_hex.clone();
+                let template_key      = job.template_key.clone();
+                let txid_root         = job.txid_partial_root.clone();
+                let witness           = job.witness_commitment_script.clone().unwrap_or_default();
+                let height            = job.height;
+                let persist_blocks    = self.config.persist_blocks;
+                let engine            = self.template_engine.clone();
+                let sqlite_for_block  = self.sqlite.clone();
+                let found_by          = worker.to_owned();
+                let requested_at     = Utc::now();
+                let version_str      = version.clone().unwrap_or_else(|| job.version.clone());
+                let version_mask_str  = format!("{:08x}", version_mask);
+                let merkle_root_hex  = header_merkle_root_hex(&result.header_hex).unwrap_or_else(|| job.txid_partial_root.clone());
+                let candidate_record = BlockCandidateRecord {
+                    id: Uuid::new_v4(),
+                    worker: worker.clone(),
+                    payout_address: session_payout_address.clone(),
+                    session_id: Some(session_extranonce1.clone()),
+                    job_id: session_job.session_job_id.clone(),
+                    height: height as i64,
+                    prevhash: job.prevhash.clone(),
+                    ntime: submit.ntime.clone(),
+                    nonce: submit.nonce.clone(),
+                    version: version_str.clone(),
+                    version_mask: version_mask_str,
+                    extranonce1: Some(session_extranonce1.clone()),
+                    extranonce2: submit.extranonce2.clone(),
+                    merkle_root: merkle_root_hex,
+                    coinbase_hex: result.coinbase_hex.clone(),
+                    block_header_hex: result.header_hex.clone(),
+                    block_hex: result.block_hex.clone(),
+                    full_block_hex: result.block_hex.clone(),
+                    block_hash: block_hash.clone(),
+                    submitted_difficulty: result.difficulty,
+                    network_difficulty: job.network_difficulty,
+                    current_share_difficulty: session_job.difficulty,
+                    submitblock_requested_at: requested_at,
+                    submitblock_result: "pending".to_string(),
+                    submitblock_latency_ms: 0,
+                    rpc_error: None,
+                    created_at: requested_at,
+                };
+                tracing::info!(
+                    "*** BLOCK FOUND by {worker} height={height} hash={block_hash} \
+                     diff={:.2} template_key=\"{}\" ***",
+                    result.difficulty, job.template_key,
+                );
+                tokio::spawn(async move {
+                    let submit_started = std::time::Instant::now();
+                    let candidate_id = candidate_record.id;
+                    let _ = sqlite_for_block.insert_block_candidate(candidate_record).await;
+                    let status = match engine.submit_block(
+                        &block_hex_owned, &block_hash, &template_key,
+                        &coinbase_hex_owned, &txid_root, &witness,
+                    ).await {
+                        Ok(_) => {
+                            tracing::info!("BLOCK SUBMITTED OK height={height} hash={block_hash}");
+                            "submitted"
+                        }
+                        Err(err) => {
+                            tracing::error!(
+                                "BLOCK SUBMIT FAILED height={height} hash={block_hash} — {err:?}"
+                            );
+                            "submit_failed"
+                        }
+                    };
+                    let rpc_error = if status == "submit_failed" {
+                        Some("submitblock RPC failure")
+                    } else {
+                        None
+                    };
+                    let _ = sqlite_for_block
+                        .update_block_candidate_result(
+                            candidate_id,
+                            status,
+                            submit_started.elapsed().as_millis() as i64,
+                            rpc_error,
+                        )
+                        .await;
+                    if persist_blocks {
+                        let _ = sqlite_for_block.insert_block(
+                            height as i64,
+                            &block_hash,
+                            Some(found_by.as_str()),
+                            status,
+                        ).await;
+                    }
+                });
+            }
+        }
+
+        let duplicate = {
+            let mut guard = state.lock().await;
+            if guard.submitted_hashes.contains(&dup_key) {
+                true
+            } else {
+                // LRU eviction: remove the single oldest entry O(1) instead of clear().
+                // The guard window shrinks by exactly one entry, so all other recent keys
+                // remain protected.  No duplicate can slip through after eviction.
+                if guard.submitted_hashes.len() >= MAX_DUP_HASHES {
+                    if let Some(oldest) = guard.submitted_hashes_order.pop_front() {
+                        guard.submitted_hashes.remove(&oldest);
+                    }
+                }
+                guard.submitted_hashes.insert(dup_key.clone());
+                guard.submitted_hashes_order.push_back(dup_key.clone());
+                false
+            }
+        };
+        let final_accepted = result.accepted && !duplicate;
+
         // ── Send acknowledgment immediately ──────────────────────────────────────
         // All decisions affecting accept/reject are already final:
         //   • duplicate detection (HashSet check + insert, above)
@@ -1108,9 +1240,16 @@ let job = session_job.job.clone();
             tracing::debug!("share rejected (worker={worker}) diff={:.2}", result.difficulty);
         }
 
-        let ack_error = if result.accepted { serde_json::Value::Null }
+        if duplicate {
+            self.metrics.counters.inc_duplicate_share();
+            tracing::debug!(
+                "duplicate share from {worker}: job={job_id} nonce={nonce_clean} ntime={ntime_clean} en2={extranonce2_clean} ver={version_key}"
+            );
+        }
+
+        let ack_error = if final_accepted { serde_json::Value::Null }
                         else { json!([23, "Low difficulty share", null]) };
-        let ack_msg = json!({"id": request.id, "result": result.accepted, "error": ack_error}).to_string();
+        let ack_msg = json!({"id": request.id, "result": final_accepted, "error": ack_error}).to_string();
         if tx.send(ack_msg).await.is_err() {
             // TCP connection closed before ACK — log only for block candidates to avoid noise.
             if result.is_block {
@@ -1121,73 +1260,6 @@ let job = session_job.job.clone();
                 );
             }
             return Ok(());
-        }
-
-        // ── Post-ack: block candidate (spawned — never blocks the session TCP loop) ──
-        //
-        // submit_block has up to 5 retries with delays 0+500+1000+2000+4000 ms = 7.5 s
-        // worst-case.  Keeping it inline would stall this session's TCP read loop for
-        // the full retry window, preventing the miner's next share from being processed.
-        //
-        // Safety: the ACK already reflects result.accepted (true for a block candidate).
-        // The miner's view is unchanged — it received accepted=true before and after.
-        // submit_block's success/failure does not change the ACK semantics; we always
-        // report the share as accepted because the work was real.
-        //
-        // Block candidate detection (result.is_block) and stale check
-        // (is_stale_block.load) both happen BEFORE the ACK — no decision is deferred.
-        if result.accepted && result.is_block {
-            if session_job.is_stale_block.load(Ordering::Acquire) {
-                // Hash is below network target but prevhash is stale — do NOT submit.
-                tracing::warn!(
-                    "GRACE-BLOCK: worker={worker} found hash below target on stale-block job \
-                     height={} hash={} — NOT submitting (wrong prevhash, grace window)",
-                    job.height, result.hash_hex
-                );
-            } else if result.block_hex.is_some() {
-                // All values cloned here are for the rare block path — perf is irrelevant.
-                let block_hex_owned   = result.block_hex.clone().unwrap();
-                let coinbase_hex_owned = result.coinbase_hex.clone().unwrap_or_default();
-                let block_hash        = result.hash_hex.clone();
-                let template_key      = job.template_key.clone();
-                let txid_root         = job.txid_partial_root.clone();
-                let witness           = job.witness_commitment_script.clone().unwrap_or_default();
-                let height            = job.height;
-                let persist_blocks    = self.config.persist_blocks;
-                let engine            = self.template_engine.clone();
-                let sqlite_for_block  = self.sqlite.clone();
-                let found_by          = worker.to_owned();
-                tracing::info!(
-                    "*** BLOCK FOUND by {worker} height={height} hash={block_hash} \
-                     diff={:.2} template_key=\"{}\" ***",
-                    result.difficulty, job.template_key,
-                );
-                tokio::spawn(async move {
-                    let status = match engine.submit_block(
-                        &block_hex_owned, &block_hash, &template_key,
-                        &coinbase_hex_owned, &txid_root, &witness,
-                    ).await {
-                        Ok(_) => {
-                            tracing::info!("BLOCK SUBMITTED OK height={height} hash={block_hash}");
-                            "submitted"
-                        }
-                        Err(err) => {
-                            tracing::error!(
-                                "BLOCK SUBMIT FAILED height={height} hash={block_hash} — {err:?}"
-                            );
-                            "submit_failed"
-                        }
-                    };
-                    if persist_blocks {
-                        let _ = sqlite_for_block.insert_block(
-                            height as i64,
-                            &block_hash,
-                            Some(found_by.as_str()),
-                            status,
-                        ).await;
-                    }
-                });
-            }
         }
 
         // ── Post-ack: vardiff + session state ─────────────────────────────────────
@@ -1229,7 +1301,7 @@ let job = session_job.job.clone();
             // current session difficulty so late shares from an older job do not
             // keep the estimator pinned high.
             effective_job_diff = job_diff.min(session_diff_after);
-            if result.accepted {
+            if final_accepted {
                 guard.vardiff.record_share(now, effective_job_diff);
             }
         }
@@ -1239,7 +1311,7 @@ let job = session_job.job.clone();
         // field needed to verify SHA256d(header) == hash externally for the first
         // N accepted shares per session.  Set SHARE_PROOF_SHARES=200 to enable.
         // When the limit is 0 this block is entirely skipped — no lock, no formatting.
-        if result.accepted && self.config.share_proof_limit > 0 {
+        if final_accepted && self.config.share_proof_limit > 0 {
             let proof_extranonce1: Option<String> = {
                 let mut guard = state.lock().await;
                 if guard.proof_shares_logged < self.config.share_proof_limit {
@@ -1279,20 +1351,16 @@ let job = session_job.job.clone();
         //
         // Safety invariants:
         //   • session_diff_after captured from the vardiff lock above (f64, Copy)
-        //   • result.accepted / is_block / difficulty are final (all Copy)
-        //   • metrics.record_share updates in-memory MinerStats atomically inside
-        //     its Arc<RwLock> — the spawn sees a consistent snapshot
-        //   • upsert_worker_best is persistence-only; in-memory best_difficulty is
-        //     updated inside record_share before this function returns
-        //   • if the pool restarts before the spawn completes, the best_difficulty
-        //     may not reach SQLite — same race existed inline (crash window unchanged)
+        //   • final_accepted / is_block / difficulty are final (all Copy)
+        //   • metrics record calls hit per-worker atomics, not a global write lock
+        //   • best summary persistence is periodic; share history stays optional
         //   • worker is moved into the spawn (not used after this point in the handler)
         {
             let metrics_s      = self.metrics.clone();
             let redis_s        = self.redis.clone();
             let sqlite_s       = self.sqlite.clone();
             let persist_shares = self.config.persist_shares;
-            let accepted       = result.accepted;
+            let accepted       = final_accepted;
             let is_block       = result.is_block;
             let share_diff     = result.difficulty;
             // Build ShareRecord before spawn so Uuid is generated on the session task.
@@ -1318,16 +1386,23 @@ let job = session_job.job.clone();
                     let _ = redis_s.set_difficulty(&worker, session_diff_after).await;
                     let _ = sqlite_s.insert_share(share).await;
                 }
-                // In-memory metrics + rare best-difficulty SQLite write.
-                if let Some(new_best) = metrics_s
-                    .record_share(
-                        &worker, effective_job_diff, share_diff, accepted, is_block,
-                        notify_to_submit_ms, submit_rtt_ms, job_age_secs,
-                        notify_delay_ms, reconnect_recent,
-                    ).await
-                {
-                    let _ = sqlite_s.upsert_worker_best(&worker, new_best).await;
-                }
+                // In-memory metrics are updated separately from persistence so
+                // the hot path never waits on SQLite or dashboard aggregation.
+                metrics_s
+                    .record_share_result(
+                        &worker,
+                        effective_job_diff,
+                        share_diff,
+                        accepted,
+                        is_block,
+                        notify_to_submit_ms,
+                        submit_rtt_ms,
+                        job_age_secs,
+                        notify_delay_ms,
+                        reconnect_recent,
+                        session_job.is_stale_block.load(Ordering::Acquire),
+                    )
+                    .await;
             });
         }
 
@@ -1705,6 +1780,14 @@ fn build_set_difficulty(diff: f64) -> String {
         "params": [diff]
     })
     .to_string()
+}
+
+fn header_merkle_root_hex(header_hex: &str) -> Option<String> {
+    let bytes = hex::decode(header_hex).ok()?;
+    if bytes.len() < 68 {
+        return None;
+    }
+    Some(hex::encode(&bytes[36..68]))
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────

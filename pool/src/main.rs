@@ -46,6 +46,12 @@ async fn run() -> anyhow::Result<()> {
     eprintln!("blackhole-pool init: loading config");
     let config = Config::from_env().context("load config")?;
 
+    if config.solo_mode {
+        eprintln!(
+            "INFO: SOLO_MODE=true — solo hunter profile enabled (raw best-share tracking, low-lock hot path, best-summary persistence)."
+        );
+    }
+
     // ── Payout address info ───────────────────────────────────────────────────
     if config.payout_address.is_empty() && config.payout_script_hex.is_none() {
         eprintln!(
@@ -93,7 +99,7 @@ async fn run() -> anyhow::Result<()> {
         RedisStore::connect(None).await?
     };
 
-    let sqlite_needed = config.persist_shares || config.persist_blocks;
+    let sqlite_needed = config.persist_shares || config.persist_blocks || config.persist_best;
     let sqlite = if sqlite_needed {
         SqliteStore::connect(config.database_url.as_deref()).await?
     } else {
@@ -102,15 +108,17 @@ async fn run() -> anyhow::Result<()> {
 
     eprintln!("blackhole-pool init: storage ready");
 
-    // Restore persisted best_difficulty for all known workers so that
-    // the all-time best share counter survives pool restarts.
+    // Restore persisted best-share records for all known workers so that
+    // the all-time best counters survive pool restarts.
     if sqlite.is_enabled() {
         match sqlite.load_worker_bests().await {
             Ok(bests) => {
-                for (worker, best_diff) in bests {
-                    metrics.set_worker_best(&worker, best_diff).await;
+                for (worker, (best_submitted, best_accepted, best_block_candidate)) in bests {
+                    metrics
+                        .set_worker_best(&worker, best_submitted, best_accepted, best_block_candidate)
+                        .await;
                 }
-                info!("loaded persisted best-difficulty records from SQLite");
+                info!("loaded persisted best-share records from SQLite");
             }
             Err(err) => {
                 tracing::warn!("could not load worker bests from SQLite: {err:?}");
@@ -124,7 +132,12 @@ async fn run() -> anyhow::Result<()> {
         config.rpc_pass.clone(),
     );
 
-    let template_engine = Arc::new(TemplateEngine::new(config.clone(), rpc.clone(), metrics.counters.clone()));
+    let template_engine = Arc::new(TemplateEngine::new(
+        config.clone(),
+        rpc.clone(),
+        metrics.clone(),
+        metrics.counters.clone(),
+    ));
 
     eprintln!("blackhole-pool init: warming template engine");
     template_engine.start().await?;
@@ -142,12 +155,36 @@ async fn run() -> anyhow::Result<()> {
     let stratum_handle = tokio::spawn(async move { stratum.run().await });
 
     // API server is optional (disable for max-perf endpoints).
+    let sqlite_for_api = sqlite.clone();
+    let rpc_for_api = rpc.clone();
     let api_handle = if config.api_enabled {
-        let api = ApiServer::new(config.clone(), metrics.clone(), sqlite, rpc, template_engine.clone());
+        let api = ApiServer::new(
+            config.clone(),
+            metrics.clone(),
+            sqlite_for_api,
+            rpc_for_api,
+            template_engine.clone(),
+        );
         Some(tokio::spawn(async move { api.run().await }))
     } else {
         None
     };
+
+    if config.persist_best && sqlite.is_enabled() {
+        let metrics_s = metrics.clone();
+        let sqlite_s = sqlite.clone();
+        let persist_every = std::time::Duration::from_secs(config.best_persist_interval_secs.max(1));
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(persist_every);
+            loop {
+                ticker.tick().await;
+                let snapshot = metrics_s.snapshot().await;
+                if let Err(err) = sqlite_s.persist_best_snapshot(&snapshot).await {
+                    tracing::warn!("best summary persistence failed: {err:?}");
+                }
+            }
+        });
+    }
 
     if let Some(api_handle) = api_handle {
         tokio::select! {

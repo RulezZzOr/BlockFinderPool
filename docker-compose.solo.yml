@@ -1,0 +1,53 @@
+services:
+  blockfinder-pool:
+    build:
+      context: ./pool
+      args:
+        BUILD_GIT_SHA: ${BUILD_GIT_SHA:-unknown}
+        BUILD_GIT_DIRTY: ${BUILD_GIT_DIRTY:-unknown}
+        BUILD_SOURCE: ${BUILD_SOURCE:-docker-compose}
+        BUILD_TIME_UTC: ${BUILD_TIME_UTC:-unknown}
+        BUILD_IMAGE_ID: ${BUILD_IMAGE_ID:-unknown}
+    env_file: ./env/.env
+    environment:
+      RUNTIME_IMAGE_REF: ${RUNTIME_IMAGE_REF:-blockfinder-blockfinder-pool:latest}
+      RUNTIME_IMAGE_ID: ${RUNTIME_IMAGE_ID:-unknown}
+      RUNTIME_CONTAINER_NAME: ${RUNTIME_CONTAINER_NAME:-blockfinder-blockfinder-pool-1}
+      SOLO_MODE: "${SOLO_MODE:-true}"
+      API_ENABLED: "${API_ENABLED:-false}"
+      PERSIST_SHARES: "${PERSIST_SHARES:-false}"
+      PERSIST_BLOCKS: "${PERSIST_BLOCKS:-true}"
+      PERSIST_BEST: "${PERSIST_BEST:-true}"
+      BEST_PERSIST_INTERVAL_SECS: "${BEST_PERSIST_INTERVAL_SECS:-10}"
+      STRATUM_PORT: "${STRATUM_PORT:-3333}"
+      API_PORT: "${API_PORT:-8080}"
+      TARGET_SHARE_TIME_SECS: "${TARGET_SHARE_TIME_SECS:-20}"
+      VARDIFF_RETARGET_SECS: "${VARDIFF_RETARGET_SECS:-45}"
+      MIN_DIFFICULTY: "${MIN_DIFFICULTY:-8192}"
+      MAX_DIFFICULTY: "${MAX_DIFFICULTY:-262144}"
+      STRATUM_START_DIFFICULTY: "${STRATUM_START_DIFFICULTY:-32768}"
+      TEMPLATE_MAX_AGE_SECS: "${TEMPLATE_MAX_AGE_SECS:-30}"
+    network_mode: host
+    restart: unless-stopped
+    cpuset: "${POOL_CPUSET:-2-3}"
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q ':1F90 ' /proc/net/tcp || grep -q ':1F90 ' /proc/net/tcp6"]
+      interval: 30s
+      timeout: 3s
+      retries: 6
+      start_period: 240s
+    volumes:
+      - pool_data:/data
+
+  blockfinder-dashboard:
+    profiles: ["dashboard"]
+    build:
+      context: ./dashboard
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      - blockfinder-pool
+
+volumes:
+  pool_data:
+    name: blockfinder_pool_data

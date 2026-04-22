@@ -1,6 +1,6 @@
 # BlockFinder
 
-A self-hosted Bitcoin solo mining pool designed for Umbrel home nodes.
+A self-hosted Bitcoin solo hunter node for small LAN fleets.
 Zero fee — 100% of every block reward goes directly to the miner's own address.
 
 ![ScreenShot](Img1.png)
@@ -26,7 +26,7 @@ Zero fee — 100% of every block reward goes directly to the miner's own address
 
 ## Quick Start — One Command
 
-### Umbrel Home
+### Automatic setup
 
 ```bash
 git clone https://github.com/RulezZzOr/BlockFinderPool.git
@@ -102,6 +102,13 @@ bash run.sh
 **Standalone:**
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.standalone.yml up -d
+```
+
+**Solo hunter profile:**
+```bash
+docker compose -f docker-compose.solo.yml up -d --build
+# Optional dashboard:
+docker compose -f docker-compose.solo.yml --profile dashboard up -d --build
 ```
 
 ### 4. Check logs
@@ -205,6 +212,40 @@ Open `http://YOUR_POOL_HOST:3334` in a browser to see:
 
 ---
 
+## Solo Hunter Mode
+
+BlockFinder includes a solo-hunter path tuned for small LAN fleets and block discovery:
+
+- `mining.submit` updates raw best-share counters immediately after the hash is known
+- block candidates are detected on the fast path before slow persistence work
+- candidate data is written to the `block_candidates` SQLite table even when `PERSIST_SHARES=false`
+- the dashboard shows raw best, accepted best, current-block best, previous-block best, and a recent candidate log
+
+This mode is intended for home users with 1–5 miners on the same LAN. It favors low-latency block discovery and honest reporting over public-pool accounting features.
+
+### Candidate logging
+
+When a share reaches or exceeds the Bitcoin network target, BlockFinder:
+
+1. updates raw best-share metrics immediately
+2. spawns the high-priority `submitblock` path immediately
+3. persists a forensic row into `block_candidates`
+4. updates the final `submitblock_result` and RPC latency after the call returns
+
+The candidate record stores the submit-time forensic details needed for post-mortem analysis:
+worker, payout address, session id, job id, height, prevhash, ntime, nonce, version,
+version-rolling mask, extranonce values, merkle root, coinbase hex, block header hex,
+full block hex when available, block hash, submitted difficulty, network difficulty,
+share difficulty, submitblock result, RPC latency, and RPC error.
+
+This happens independently of `PERSIST_SHARES=false`, so a solo hunter can keep the block-candidate audit trail without retaining every accepted share.
+
+Donation address:
+
+`bc1pzvqagy932kmts9rluzpq39upk0hnttz22gdyeslf8lpc4aepyrqslfds96`
+
+---
+
 ## API
 
 The REST API is available on port `8081`:
@@ -216,6 +257,7 @@ The REST API is available on port `8081`:
 | `GET /miners` | Per-worker stats |
 | `GET /hashrate` | Hashrate history |
 | `GET /blocks` | Found blocks |
+| `GET /block-candidates` | Recent block candidates and submitblock results |
 | `GET /network` | Network difficulty, block height |
 | `GET /metrics` | Internal counters (ZMQ, jobs, stales…) |
 
@@ -324,6 +366,23 @@ On Umbrel: upgrade via the Umbrel UI → Bitcoin Node → Update.
 
 Disk budget: ~200 bytes/share → ~300 MB per million shares (~69 h at 240 TH/s).
 
+### Solo Hunter defaults
+
+For a 1-5 miner LAN node, the recommended defaults are:
+
+```env
+SOLO_MODE=true
+PERSIST_SHARES=false
+PERSIST_BLOCKS=true
+PERSIST_BEST=true
+BEST_PERSIST_INTERVAL_SECS=10
+TARGET_SHARE_TIME_SECS=20
+VARDIFF_RETARGET_SECS=45
+MIN_DIFFICULTY=8192
+MAX_DIFFICULTY=262144
+STRATUM_START_DIFFICULTY=32768
+```
+
 ### `ZMQ_DEBOUNCE_MS`
 
 Controls how often ZMQ TX events trigger a `getblocktemplate` call.
@@ -333,7 +392,7 @@ is largely independent of this value.  The main effect is Bitcoin Core CPU load.
 | Value | GBT calls/min | Core data | Use case |
 |-------|--------------|-----------|---------|
 | 1000 | ~66 | ~3.2 MB/s | Maximum fee freshness |
-| 1500 | ~44 | ~2.1 MB/s | Balanced (recommended for Umbrel Home) |
+| 1500 | ~44 | ~2.1 MB/s | Balanced (recommended) |
 | 3000 | ~22 | ~1.1 MB/s | Reduce Core CPU, minimal freshness cost |
 
 ### `POST_BLOCK_SUPPRESS_MS`
@@ -356,7 +415,8 @@ per-miner bucket — no artificial delays, no wasted refills.
 
 ## API Reference
 
-The REST API is available on **port 8081** (host-mapped from container port 8080).
+ The REST API is available on **port 8080** in standalone/solo mode, or **8081** when
+ mapped behind Umbrel.
 
 | Endpoint | Description |
 |---|---|

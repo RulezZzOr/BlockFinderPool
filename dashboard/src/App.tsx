@@ -1,13 +1,15 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import {
-  PoolStats, Miner, NetworkInfo, BlockRow, PublicBlockRow,
-  fetchPool, fetchMiners,
+  PoolStats, Miner, NetworkInfo, BlockRow, PublicBlockRow, BlockCandidateRow, HashrateResponse,
+  fetchPool, fetchMiners, fetchHashrate,
   fetchBlocks,
+  fetchBlockCandidates,
   fetchPublicBlocks,
   fmtHr, fmtDiff, fmtNetHash, fmtUptime, fmtBlockInterval, timeAgo, shortWorker, shortAddress, getFirmwareLabel,
   blockSubsidy, fmtBtc,
 } from "./api";
 import BlocksTable from "./components/BlocksTable";
+import BlockCandidatesTable from "./components/BlockCandidatesTable";
 import PublicBlocksTable from "./components/PublicBlocksTable";
 import "./styles.css";
 
@@ -30,6 +32,203 @@ function fmtK(n: number): string {
   if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
   if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
   return String(n);
+}
+
+const HASHES_PER_DIFF = 4_294_967_296;
+
+type HealthSeverity = "ok" | "warning" | "critical";
+
+type HealthReason = {
+  label: string;
+  detail: string;
+  severity: HealthSeverity;
+};
+
+type MiningHealthSummary = {
+  severity: HealthSeverity;
+  reasons: HealthReason[];
+  expectedSharesPerMin: number;
+  observedSharesPerMin: number;
+  observedVsExpected: number;
+  bestProbability: number | null;
+  staleRatio: number;
+  rejectRatio: number;
+  duplicateRatio: number;
+  runtimeSecs: number;
+  templateAgeSecs: number | null;
+  zmqLastBlockAgeSecs: number | null;
+  rpcHealthy: boolean;
+  zmqConnected: boolean;
+};
+
+function safePercent(numer: number, denom: number): number {
+  if (!denom) return 0;
+  return numer / denom;
+}
+
+function probabilityAtLeastOne(hashrateHs: number, difficulty: number, runtimeSecs: number): number {
+  if (!Number.isFinite(hashrateHs) || !Number.isFinite(difficulty) || !Number.isFinite(runtimeSecs)) return 0;
+  if (hashrateHs <= 0 || difficulty <= 0 || runtimeSecs <= 0) return 0;
+  const lambda = (hashrateHs * runtimeSecs) / (difficulty * HASHES_PER_DIFF);
+  if (lambda <= 0) return 0;
+  return 1 - Math.exp(-lambda);
+}
+
+function deriveMiningHealth(
+  pool: PoolStats | null,
+  miners: Miner[],
+  hashrate: HashrateResponse | null,
+): MiningHealthSummary {
+  const runtimeSecs = pool?.uptimeSecs ?? 0;
+  const totalAccepted = miners.reduce((sum, m) => sum + (m.shares ?? 0), 0);
+  const totalRejected = miners.reduce((sum, m) => sum + (m.rejected ?? 0), 0);
+  const totalStale = miners.reduce((sum, m) => sum + (m.stale ?? 0), 0);
+  const totalDuplicates = pool?.duplicateShares ?? 0;
+  const totalSubmissions = totalAccepted + totalRejected + totalStale + totalDuplicates;
+
+  const expectedSharesPerMin = miners.reduce((sum, miner) => {
+    const hrHs = Math.max(0, miner.hashrate_gh ?? 0) * 1e9;
+    const diff = miner.difficulty ?? 0;
+    if (hrHs <= 0 || diff <= 0) return sum;
+    return sum + (hrHs / (diff * HASHES_PER_DIFF)) * 60;
+  }, 0);
+
+  const windowStart = Date.now() - 10 * 60 * 1000;
+  const observedSharesLast10Min = (hashrate?.recent ?? []).reduce((sum, point) => {
+    const ts = Date.parse(point.timestamp);
+    if (Number.isNaN(ts) || ts < windowStart) return sum;
+    return sum + (point.shares ?? 0);
+  }, 0);
+  const observedSharesPerMin = observedSharesLast10Min / 10;
+  const observedVsExpected = expectedSharesPerMin > 0 ? observedSharesPerMin / expectedSharesPerMin : 0;
+
+  const staleRatio = safePercent(totalStale, totalSubmissions);
+  const rejectRatio = safePercent(totalRejected, totalSubmissions);
+  const duplicateRatio = safePercent(totalDuplicates, totalSubmissions);
+
+  const bestForProbability = Math.max(
+    pool?.currentBlockBestSubmittedDifficulty ?? 0,
+    ...miners.map((m) => m.current_block_best_submitted_difficulty ?? 0),
+  );
+  const bestProbability = bestForProbability > 0 && runtimeSecs > 0
+    ? probabilityAtLeastOne((pool?.totalHashRate ?? 0), bestForProbability, runtimeSecs)
+    : null;
+
+  const templateAgeSecs = pool?.templateAgeSecs ?? pool?.currentTemplateAgeSecs ?? null;
+  const zmqLastBlockAgeSecs = pool?.lastZmqBlockAt
+    ? Math.max(0, Math.floor((Date.now() - new Date(pool.lastZmqBlockAt).getTime()) / 1000))
+    : null;
+  const rpcHealthy = pool?.rpcHealthy ?? false;
+  const zmqConnected = pool?.zmqConnected ?? false;
+
+  const reasons: HealthReason[] = [];
+  if (!rpcHealthy) {
+    reasons.push({
+      label: "RPC health",
+      detail: "getblocktemplate or getmininginfo has not been confirmed healthy",
+      severity: "critical",
+    });
+  }
+  if (!zmqConnected) {
+    reasons.push({
+      label: "ZMQ connection",
+      detail: "block/tx endpoints are not configured or not connected",
+      severity: "critical",
+    });
+  }
+  if ((pool?.templateRefreshFailures ?? 0) > 0) {
+    reasons.push({
+      label: "Template refresh failures",
+      detail: `${pool?.templateRefreshFailures ?? 0} failures logged`,
+      severity: "warning",
+    });
+  }
+  if ((pool?.templateStale ?? false) || (templateAgeSecs != null && templateAgeSecs > (pool?.templateMaxAgeSecs ?? 30))) {
+    reasons.push({
+      label: "Template freshness",
+      detail: templateAgeSecs != null ? `${templateAgeSecs}s old` : "template missing",
+      severity: "critical",
+    });
+  }
+  if (runtimeSecs >= 600 && expectedSharesPerMin > 0 && observedVsExpected < 0.5) {
+    reasons.push({
+      label: "Share rate lag",
+      detail: `${(observedVsExpected * 100).toFixed(1)}% of expected over 10m`,
+      severity: "warning",
+    });
+  }
+  if (staleRatio > 0.02) {
+    reasons.push({
+      label: "Stale ratio",
+      detail: `${(staleRatio * 100).toFixed(2)}%`,
+      severity: "warning",
+    });
+  }
+  if (rejectRatio > 0.02) {
+    reasons.push({
+      label: "Reject ratio",
+      detail: `${(rejectRatio * 100).toFixed(2)}%`,
+      severity: "warning",
+    });
+  }
+  if (duplicateRatio > 0.005) {
+    reasons.push({
+      label: "Duplicate ratio",
+      detail: `${(duplicateRatio * 100).toFixed(2)}%`,
+      severity: "warning",
+    });
+  }
+  if ((pool?.submitRttP99Ms ?? 0) > 50) {
+    reasons.push({
+      label: "Submit RTT p99",
+      detail: `${(pool?.submitRttP99Ms ?? 0).toFixed(2)}ms`,
+      severity: "warning",
+    });
+  }
+  if (bestProbability !== null && bestProbability < 0.01) {
+    reasons.push({
+      label: "Current best probability",
+      detail: `${(bestProbability * 100).toFixed(3)}% chance to see this best`,
+      severity: "warning",
+    });
+  }
+  if (zmqLastBlockAgeSecs != null && zmqLastBlockAgeSecs > 120) {
+    reasons.push({
+      label: "ZMQ block age",
+      detail: `${zmqLastBlockAgeSecs}s since last block event`,
+      severity: "warning",
+    });
+  }
+  if ((pool?.currentBlockHeight ?? 0) === 0) {
+    reasons.push({
+      label: "Block height",
+      detail: "unknown current block height",
+      severity: "critical",
+    });
+  }
+
+  const severity: HealthSeverity = reasons.some((r) => r.severity === "critical")
+    ? "critical"
+    : reasons.length > 0
+      ? "warning"
+      : "ok";
+
+  return {
+    severity,
+    reasons,
+    expectedSharesPerMin,
+    observedSharesPerMin,
+    observedVsExpected,
+    bestProbability,
+    staleRatio,
+    rejectRatio,
+    duplicateRatio,
+    runtimeSecs,
+    templateAgeSecs,
+    zmqLastBlockAgeSecs,
+    rpcHealthy,
+    zmqConnected,
+  };
 }
 
 // ─── BlockFinder Core Visual ──────────────────────────────────────────────────
@@ -194,6 +393,10 @@ function ShareFlowPanel({ pool, miners }: { pool: PoolStats | null; miners: Mine
   const avgRtt = miners.length > 0
     ? miners.reduce((s, m) => s + m.submit_rtt_ms, 0) / miners.length
     : 0;
+  const submitRttP50 = pool?.submitRttP50Ms ?? 0;
+  const submitRttP95 = pool?.submitRttP95Ms ?? 0;
+  const submitRttP99 = pool?.submitRttP99Ms ?? 0;
+  const submitRttMax = pool?.submitRttMaxMs ?? 0;
 
   return (
     <div className="bh-card bh-animate bh-animate-d2">
@@ -247,6 +450,35 @@ function ShareFlowPanel({ pool, miners }: { pool: PoolStats | null; miners: Mine
         </div>
         <div className="bh-bar" style={{ marginTop: 8 }}>
           <div className="bh-bar-fill bh-bar-blue" style={{ width: `${Math.min(100, avgRtt * 2000)}%` }} />
+        </div>
+      </div>
+
+      <div style={{ marginTop: 16 }}>
+        <div className="bh-label" style={{ marginBottom: 8 }}>Submit RTT Percentiles</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
+          {[
+            { label: "p50", value: submitRttP50 },
+            { label: "p95", value: submitRttP95 },
+            { label: "p99", value: submitRttP99 },
+            { label: "max", value: submitRttMax },
+          ].map(({ label, value }) => (
+            <div key={label} style={{
+              padding: "8px 10px",
+              background: "var(--card2)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius)",
+            }}>
+              <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text3)", letterSpacing: ".08em" }}>{label.toUpperCase()}</div>
+              <div style={{ fontFamily: "var(--font-mono)", fontSize: 18, color: "var(--orange)", lineHeight: 1.2 }}>
+                {value > 0 ? `${value.toFixed(2)}ms` : "—"}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text3)", marginTop: 8, lineHeight: 1.5 }}>
+          {pool
+            ? `>50ms ${pool.submitRttOver50MsCount} · >100ms ${pool.submitRttOver100MsCount}`
+            : "—"}
         </div>
       </div>
 
@@ -341,9 +573,32 @@ function EnginePanel({ pool }: { pool: PoolStats | null }) {
 // ─── Block Candidate Panel ────────────────────────────────────────────────────
 
 function BlockPanel({ pool, miners, network }: { pool: PoolStats | null; miners: Miner[]; network: NetworkInfo | null }) {
-  const bestDiff = miners.reduce((mx, m) => Math.max(mx, m.best_difficulty ?? 0), 0);
+  const bestSubmitted = Math.max(
+    pool?.globalBestSubmittedDifficulty ?? 0,
+    ...miners.map((m) => m.best_submitted_difficulty ?? 0),
+  );
+  const bestAccepted = Math.max(
+    pool?.globalBestAcceptedDifficulty ?? 0,
+    ...miners.map((m) => m.best_accepted_difficulty ?? 0),
+  );
+  const currentBlockBestSubmitted = Math.max(
+    pool?.currentBlockBestSubmittedDifficulty ?? 0,
+    ...miners.map((m) => m.current_block_best_submitted_difficulty ?? 0),
+  );
+  const currentBlockBestAccepted = Math.max(
+    pool?.currentBlockBestAcceptedDifficulty ?? 0,
+    ...miners.map((m) => m.current_block_best_accepted_difficulty ?? 0),
+  );
+  const previousBlockBestSubmitted = Math.max(
+    pool?.previousBlockBestSubmittedDifficulty ?? 0,
+    ...miners.map((m) => m.previous_block_best_submitted_difficulty ?? 0),
+  );
+  const previousBlockBestAccepted = Math.max(
+    pool?.previousBlockBestAcceptedDifficulty ?? 0,
+    ...miners.map((m) => m.previous_block_best_accepted_difficulty ?? 0),
+  );
   const networkDiff = network?.difficulty ?? 145e12;
-  const bestPct = networkDiff > 0 ? (bestDiff / networkDiff * 100) : 0;
+  const bestPct = networkDiff > 0 ? (bestSubmitted / networkDiff * 100) : 0;
   const blocksFound = pool?.blocksFound ?? 0;
   const totalHr = (pool?.totalHashRate ?? 0) / 1e9; // in GH/s
   const expectedBlockSecs = networkDiff > 0 && totalHr > 0
@@ -369,13 +624,13 @@ function BlockPanel({ pool, miners, network }: { pool: PoolStats | null; miners:
       </div>
 
       <div className="bh-best-share">
-        <div className="bh-best-share-val">{fmtDiff(bestDiff)}</div>
+        <div className="bh-best-share-val">{fmtDiff(bestSubmitted)}</div>
         <div className="bh-best-share-pct">
           {bestPct > 0 ? `${bestPct.toFixed(6)}% of network difficulty` : "Awaiting first share…"}
         </div>
       </div>
 
-      {bestDiff > 0 && (
+      {bestSubmitted > 0 && (
         <div>
           <div className="bh-bar" style={{ height: 4, marginTop: 0, marginBottom: 12 }}>
             <div className="bh-bar-fill bh-bar-orange" style={{ width: `${Math.min(100, Math.log10(bestPct + 0.0001) / Math.log10(100) * 100 + 50)}%` }} />
@@ -384,8 +639,52 @@ function BlockPanel({ pool, miners, network }: { pool: PoolStats | null; miners:
       )}
 
       <div className="bh-stat-row">
-        <span className="bh-stat-row-label">Best Submitted Diff</span>
-        <span className="bh-stat-row-value yellow">{fmtDiff(bestDiff)}</span>
+        <span className="bh-stat-row-label" title="Highest difficulty hash submitted by this miner, including stale/rejected/low-diff submissions if they were parsed successfully.">
+          Raw Best Submitted
+        </span>
+        <span className="bh-stat-row-value yellow">{fmtDiff(bestSubmitted)}</span>
+      </div>
+      <div className="bh-stat-row">
+        <span className="bh-stat-row-label" title="Highest share accepted by the configured pool difficulty rules.">
+          Accepted Best
+        </span>
+        <span className="bh-stat-row-value green">{fmtDiff(bestAccepted)}</span>
+      </div>
+      <div className="bh-stat-row">
+        <span className="bh-stat-row-label" title="Alias of Raw Best Submitted. Matches the public-pool style best-difficulty display.">
+          PublicPool Style Best
+        </span>
+        <span className="bh-stat-row-value yellow">{fmtDiff(bestSubmitted)}</span>
+      </div>
+      <div className="bh-stat-row">
+        <span className="bh-stat-row-label" title="Alias of Accepted Best. Matches cgminer-style accepted-share reporting.">
+          CGMiner Style Best
+        </span>
+        <span className="bh-stat-row-value green">{fmtDiff(bestAccepted)}</span>
+      </div>
+      <div className="bh-stat-row">
+        <span className="bh-stat-row-label" title="Best share that reached or exceeded the Bitcoin network target.">
+          Block Candidate Best
+        </span>
+        <span className="bh-stat-row-value yellow">{fmtDiff(pool?.globalBestBlockCandidateDifficulty ?? 0)}</span>
+      </div>
+      <div className="bh-stat-row">
+        <span className="bh-stat-row-label">Current Block Best Submitted</span>
+        <span className="bh-stat-row-value cyan">{fmtDiff(currentBlockBestSubmitted)}</span>
+      </div>
+      <div className="bh-stat-row">
+        <span className="bh-stat-row-label">Current Block Best Accepted</span>
+        <span className="bh-stat-row-value green">{fmtDiff(currentBlockBestAccepted)}</span>
+      </div>
+      <div className="bh-stat-row">
+        <span className="bh-stat-row-label">Current Block Best Candidate</span>
+        <span className="bh-stat-row-value orange">{fmtDiff(pool?.currentBlockBestCandidateDifficulty ?? 0)}</span>
+      </div>
+      <div className="bh-stat-row">
+        <span className="bh-stat-row-label">Previous Block Best</span>
+        <span className="bh-stat-row-value dim">
+          {fmtDiff(Math.max(previousBlockBestSubmitted, previousBlockBestAccepted, pool?.previousBlockBestCandidateDifficulty ?? 0))}
+        </span>
       </div>
       <div className="bh-stat-row">
         <span className="bh-stat-row-label">Network Target</span>
@@ -431,11 +730,14 @@ function BlockPanel({ pool, miners, network }: { pool: PoolStats | null; miners:
 function SystemHealth({ pool, miners }: { pool: PoolStats | null; miners: Miner[] }) {
   const staleRatioOk = (pool?.staleRatio ?? 0) < 0.005;
   const zmqOk = pool ? (pool.zmqBlockNotifications === 0 || pool.zmqBlockNotifications / Math.max(1, pool.zmqBlocksDetected) >= 1.8) : false;
+  const templateOk = pool ? !pool.templateStale : false;
+  const zmqConnectedOk = pool?.zmqConnected ?? false;
+  const templateAgeSecs = pool?.currentTemplateAgeSecs ?? null;
   const vrOk = (pool?.versionRollingViolations ?? 0) === 0;
   const dupOk = (pool?.duplicateShares ?? 0) === 0;
   const rpcOk = (pool?.submitblockRpcFail ?? 0) === 0;
   const staleNewBlockOk = (pool?.stalesNewBlock ?? 0) === 0;
-  const allOk = staleRatioOk && zmqOk && vrOk && dupOk && rpcOk && staleNewBlockOk;
+  const allOk = staleRatioOk && zmqOk && templateOk && zmqConnectedOk && vrOk && dupOk && rpcOk && staleNewBlockOk;
 
   return (
     <div className="bh-card bh-animate bh-animate-d3">
@@ -457,6 +759,8 @@ function SystemHealth({ pool, miners }: { pool: PoolStats | null; miners: Miner[
         { label: "Stale Rate", ok: staleRatioOk, detail: `${((pool?.staleRatio ?? 0) * 100).toFixed(4)}%` },
         { label: "New-Block Stales", ok: staleNewBlockOk, detail: String(pool?.stalesNewBlock ?? 0) },
         { label: "ZMQ Dual Endpoints", ok: zmqOk, detail: pool && pool.zmqBlocksDetected > 0 ? `${(pool.zmqBlockNotifications / pool.zmqBlocksDetected).toFixed(2)}x` : "idle" },
+        { label: "Template Freshness", ok: templateOk, detail: templateAgeSecs != null ? `${fmtMs(templateAgeSecs * 1000)} / ${pool!.templateMaxAgeSecs}s` : "idle" },
+        { label: "ZMQ Connected", ok: zmqConnectedOk, detail: pool?.zmqConnected ? `block+tx` : "offline" },
         { label: "Version Rolling", ok: vrOk, detail: `${pool?.versionRollingViolations ?? 0} violations` },
         { label: "Duplicate Shares", ok: dupOk, detail: String(pool?.duplicateShares ?? 0) },
         { label: "RPC Failures", ok: rpcOk, detail: String(pool?.submitblockRpcFail ?? 0) },
@@ -500,6 +804,150 @@ function SystemHealth({ pool, miners }: { pool: PoolStats | null; miners: Miner[
   );
 }
 
+// ─── Mining Health Panel ─────────────────────────────────────────────────────
+
+function MiningHealthPanel({
+  pool,
+  miners,
+  hashrate,
+}: {
+  pool: PoolStats | null;
+  miners: Miner[];
+  hashrate: HashrateResponse | null;
+}) {
+  if (!pool) {
+    return (
+      <div className="bh-card bh-animate bh-animate-d4 bh-health-card">
+        <div className="bh-card-title">
+          <span className="bh-card-title-dot" style={{ background: "var(--text3)" }} />
+          Mining Health
+        </div>
+        <div className="bh-block-feed-empty">Waiting for pool metrics…</div>
+      </div>
+    );
+  }
+
+  const health = deriveMiningHealth(pool, miners, hashrate);
+  const severityLabel = health.severity === "critical"
+    ? "Critical"
+    : health.severity === "warning"
+      ? "Warning"
+      : "OK";
+  const severityClass = health.severity === "critical"
+    ? "bh-health-err"
+    : health.severity === "warning"
+      ? "bh-health-warn"
+      : "bh-health-ok";
+
+  const bestProbPct = health.bestProbability == null ? null : health.bestProbability * 100;
+  const blockLabel = pool ? `Block #${pool.blockHeight.toLocaleString()}` : "Block —";
+
+  return (
+    <div className="bh-card bh-animate bh-animate-d4 bh-health-card">
+      <div className="bh-card-title">
+        <span className="bh-card-title-dot" style={{ background: health.severity === "critical" ? "var(--red)" : health.severity === "warning" ? "var(--yellow)" : "var(--green)" }} />
+        Mining Health
+        <span className={`bh-health-badge ${severityClass}`} style={{ marginLeft: "auto" }}>
+          {severityLabel}
+        </span>
+      </div>
+
+      <div className="bh-health-grid">
+        <div className="bh-health-kpi">
+          <div className="bh-health-kpi-label">Expected / min</div>
+          <div className="bh-health-kpi-value">{health.expectedSharesPerMin > 0 ? health.expectedSharesPerMin.toFixed(2) : "—"}</div>
+        </div>
+        <div className="bh-health-kpi">
+          <div className="bh-health-kpi-label">Observed / min</div>
+          <div className="bh-health-kpi-value">{health.observedSharesPerMin > 0 ? health.observedSharesPerMin.toFixed(2) : "—"}</div>
+        </div>
+        <div className="bh-health-kpi">
+          <div className="bh-health-kpi-label">Observed / Expected</div>
+          <div className="bh-health-kpi-value">{health.expectedSharesPerMin > 0 ? `${(health.observedVsExpected * 100).toFixed(1)}%` : "—"}</div>
+        </div>
+        <div className="bh-health-kpi">
+          <div className="bh-health-kpi-label">Current best chance</div>
+          <div className="bh-health-kpi-value">{bestProbPct != null ? `${bestProbPct.toFixed(3)}%` : "—"}</div>
+        </div>
+      </div>
+
+      <div className="bh-health-meta">
+        <span>{blockLabel}</span>
+        <span>Template {health.templateAgeSecs != null ? `${health.templateAgeSecs}s` : "—"}</span>
+        <span>ZMQ block age {health.zmqLastBlockAgeSecs != null ? `${health.zmqLastBlockAgeSecs}s` : "—"}</span>
+        <span>RPC {health.rpcHealthy ? "healthy" : "down"}</span>
+        <span>ZMQ {health.zmqConnected ? "connected" : "down"}</span>
+        <span>Last clean jobs {pool.lastCleanJobsNotifyAt ? timeAgo(pool.lastCleanJobsNotifyAt) : "—"}</span>
+        <span>Runtime {fmtUptime(health.runtimeSecs)}</span>
+      </div>
+
+      <div className="bh-health-metrics">
+        <div className="bh-health-metric">
+          <span>Stale ratio</span>
+          <strong style={{ color: health.staleRatio > 0.02 ? "var(--yellow)" : "var(--green)" }}>
+            {(health.staleRatio * 100).toFixed(4)}%
+          </strong>
+        </div>
+        <div className="bh-health-metric">
+          <span>Reject ratio</span>
+          <strong style={{ color: health.rejectRatio > 0.02 ? "var(--yellow)" : "var(--green)" }}>
+            {(health.rejectRatio * 100).toFixed(4)}%
+          </strong>
+        </div>
+        <div className="bh-health-metric">
+          <span>Duplicate ratio</span>
+          <strong style={{ color: health.duplicateRatio > 0.005 ? "var(--yellow)" : "var(--green)" }}>
+            {(health.duplicateRatio * 100).toFixed(4)}%
+          </strong>
+        </div>
+        <div className="bh-health-metric">
+          <span>Submit RTT p99</span>
+          <strong style={{ color: (pool?.submitRttP99Ms ?? 0) > 50 ? "var(--yellow)" : "var(--green)" }}>
+            {(pool?.submitRttP99Ms ?? 0) > 0 ? `${pool!.submitRttP99Ms.toFixed(2)}ms` : "—"}
+          </strong>
+        </div>
+        <div className="bh-health-metric">
+          <span>Current block height</span>
+          <strong style={{ color: "var(--cyan)" }}>
+            {pool ? `#${pool.blockHeight.toLocaleString()}` : "—"}
+          </strong>
+        </div>
+        <div className="bh-health-metric">
+          <span>Current block best</span>
+          <strong style={{ color: "var(--orange)" }}>
+            {pool ? fmtDiff(pool.currentBlockBestSubmittedDifficulty) : "—"}
+          </strong>
+        </div>
+      </div>
+
+      <div className="bh-health-reasons">
+        <div className="bh-health-reasons-head">Reasons</div>
+        {health.reasons.length > 0 ? (
+          health.reasons.map((reason) => (
+            <div key={`${reason.label}:${reason.detail}`} className={`bh-health-reason bh-health-reason-${reason.severity}`}>
+              <div className="bh-health-reason-label">
+                <span className="bh-health-reason-dot" />
+                {reason.label}
+              </div>
+              <div className="bh-health-reason-detail">{reason.detail}</div>
+            </div>
+          ))
+        ) : (
+          <div className="bh-health-reason bh-health-reason-ok">
+            <div className="bh-health-reason-label">
+              <span className="bh-health-reason-dot" />
+              No anomalies detected
+            </div>
+            <div className="bh-health-reason-detail">
+              Share rate, latency and template freshness are within normal bounds.
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Miner Fleet ──────────────────────────────────────────────────────────────
 
 /** Extract the payout address from a worker name like "bc1qXXX.Work1" → "bc1qXXX" */
@@ -513,7 +961,7 @@ function MinerFleet({ miners, network }: { miners: Miner[]; network: NetworkInfo
 
   const sorted = [...miners].sort((a, b) => {
     switch (sort) {
-      case "best":   return (b.best_difficulty ?? 0) - (a.best_difficulty ?? 0);
+      case "best":   return (b.best_submitted_difficulty ?? 0) - (a.best_submitted_difficulty ?? 0);
       case "shares": return b.shares - a.shares;
       case "rtt":    return a.submit_rtt_ms - b.submit_rtt_ms;
       default:       return b.hashrate_gh - a.hashrate_gh;
@@ -539,7 +987,7 @@ function MinerFleet({ miners, network }: { miners: Miner[]; network: NetworkInfo
   //   Champion (max across all miners) → yellow (current leader)
   //   ≥ 1G (non-champion) → green  (great, but not the best right now)
   //   < 1G  → white  (normal)
-  const maxBestDiff = Math.max(...miners.map(m => m.best_difficulty ?? 0), 0);
+  const maxBestDiff = Math.max(...miners.map(m => m.best_submitted_difficulty ?? 0), 0);
 
   function bestDiffColor(d: number): string {
     if (d <= 0)                  return "var(--text3)";
@@ -571,14 +1019,15 @@ function MinerFleet({ miners, network }: { miners: Miner[]; network: NetworkInfo
         </span>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           {[
-            { key: "hr", label: "Hashrate" },
-            { key: "best", label: "Best Share" },
-            { key: "shares", label: "Shares" },
-            { key: "rtt", label: "RTT" },
-          ].map(({ key, label }) => (
+            { key: "hr", label: "Hashrate", title: "Sort by current hashrate" },
+            { key: "best", label: "Raw Best", title: "Sort by highest raw submitted share" },
+            { key: "shares", label: "Shares", title: "Sort by accepted share count" },
+            { key: "rtt", label: "RTT", title: "Sort by pool processing time" },
+          ].map(({ key, label, title }) => (
             <button
               key={key}
               onClick={() => setSort(key as typeof sort)}
+              title={title}
               style={{
                 padding: "4px 10px",
                 background: sort === key ? "var(--orange-lo)" : "var(--card2)",
@@ -604,7 +1053,9 @@ function MinerFleet({ miners, network }: { miners: Miner[]; network: NetworkInfo
               <th>Payout</th>
               <th style={sort === "hr" ? thActive : th} onClick={() => setSort("hr")}>Hashrate ↕</th>
               <th>Difficulty</th>
-              <th style={sort === "best" ? thActive : th} onClick={() => setSort("best")}>Best Share ↕</th>
+              <th style={sort === "best" ? thActive : th} onClick={() => setSort("best")}>Raw Best Submitted ↕</th>
+              <th>Accepted Best</th>
+              <th>Current Block Best</th>
               <th style={sort === "shares" ? thActive : th} onClick={() => setSort("shares")}>Shares ↕</th>
               <th>Stale</th>
               <th style={sort === "rtt" ? thActive : th} onClick={() => setSort("rtt")}>RTT ↕</th>
@@ -653,17 +1104,27 @@ function MinerFleet({ miners, network }: { miners: Miner[]; network: NetworkInfo
                   <td style={{ color: "var(--text3)" }}>{fmtDiff(m.difficulty)}</td>
                   <td>
                     <span style={{
-                      color: bestDiffColor(m.best_difficulty),
-                      fontWeight: m.best_difficulty >= 1e9 ? 600 : 500,
-                      textShadow: bestDiffGlow(m.best_difficulty),
+                      color: bestDiffColor(m.best_submitted_difficulty),
+                      fontWeight: m.best_submitted_difficulty >= 1e9 ? 600 : 500,
+                      textShadow: bestDiffGlow(m.best_submitted_difficulty),
                     }}>
-                      {fmtDiff(m.best_difficulty)}
+                      {fmtDiff(m.best_submitted_difficulty)}
                     </span>
-                    {network && m.best_difficulty > 0 && (
+                    {network && m.best_submitted_difficulty > 0 && (
                       <span style={{ marginLeft: 6, fontSize: 10, color: "var(--text3)" }}>
-                        {(m.best_difficulty / network.difficulty * 100).toFixed(6)}%
+                        {(m.best_submitted_difficulty / network.difficulty * 100).toFixed(6)}%
                       </span>
                     )}
+                  </td>
+                  <td>
+                    <span style={{ color: "var(--green)" }} title="Accepted by configured share difficulty.">
+                      {fmtDiff(m.best_accepted_difficulty)}
+                    </span>
+                  </td>
+                  <td>
+                    <span style={{ color: "var(--cyan)" }} title="Best share in the current block/template window.">
+                      {fmtDiff(m.current_block_best_submitted_difficulty)}
+                    </span>
                   </td>
                   <td style={{ color: "var(--text)" }}>{m.shares.toLocaleString()}</td>
                   <td>
@@ -764,6 +1225,8 @@ function Footer({ pool, miners }: { pool: PoolStats | null; miners: Miner[] }) {
         <span>Fee: 0%</span>
         <span style={{ color: "var(--border2)" }}>·</span>
         <span>Stratum: :3333</span>
+        <span style={{ color: "var(--border2)" }}>·</span>
+        <span title="Donate address">Donate: bc1pzvqagy932kmts9rluzpq39upk0hnttz22gdyeslf8lpc4aepyrqslfds96</span>
       </div>
       <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text3)" }}>
         Refresh 5s · {new Date().toLocaleTimeString()}
@@ -956,7 +1419,9 @@ export default function App() {
   const [pool, setPool] = useState<PoolStats | null>(null);
   const [miners, setMiners] = useState<Miner[]>([]);
   const [blocks, setBlocks] = useState<BlockRow[]>([]);
+  const [blockCandidates, setBlockCandidates] = useState<BlockCandidateRow[]>([]);
   const [publicBlocks, setPublicBlocks] = useState<PublicBlockRow[]>([]);
+  const [hashrate, setHashrate] = useState<HashrateResponse | null>(null);
   const [network, setNetwork] = useState<NetworkInfo | null>(null);
   const [live, setLive] = useState(false);
   const [celebrating, setCelebrating] = useState(false);
@@ -980,10 +1445,12 @@ export default function App() {
       // getmininginfo RPC.
       // [Fix 3] Use allSettled so a flaky /miners response does NOT flip
       // the dashboard OFFLINE; pool health drives the LIVE indicator.
-      const [poolResult, minersResult, blocksResult] = await Promise.allSettled([
+      const [poolResult, minersResult, blocksResult, blockCandidatesResult, hashrateResult] = await Promise.allSettled([
         fetchPool(),
         fetchMiners(),
         fetchBlocks(),
+        fetchBlockCandidates(),
+        fetchHashrate(),
       ]);
 
       if (poolResult.status === "fulfilled") {
@@ -1028,6 +1495,14 @@ export default function App() {
       if (blocksResult.status === "fulfilled") {
         setBlocks(blocksResult.value);
       }
+
+      if (blockCandidatesResult.status === "fulfilled") {
+        setBlockCandidates(blockCandidatesResult.value);
+      }
+
+      if (hashrateResult.status === "fulfilled") {
+        setHashrate(hashrateResult.value);
+      }
     } finally {
       // [Fix 2] Always release the guard, even on errors.
       loadingRef.current = false;
@@ -1067,6 +1542,7 @@ export default function App() {
       <NetworkBar pool={pool} network={network} />
       <div className="bh-top-grid">
         <BlocksTable blocks={blocks} />
+        <BlockCandidatesTable candidates={blockCandidates} />
         <PublicBlocksTable blocks={publicBlocks} />
       </div>
 
@@ -1093,6 +1569,13 @@ export default function App() {
         <BlockPanel pool={pool} miners={miners} network={network} />
         <SystemHealth pool={pool} miners={miners} />
       </div>
+
+      {/* Mining Health */}
+      <div className="bh-section-title" id="bh-health">
+        <span>Mining Health</span>
+        <div className="bh-section-line" />
+      </div>
+      <MiningHealthPanel pool={pool} miners={miners} hashrate={hashrate} />
 
       {/* Miner Fleet */}
       <div className="bh-section-title" id="bh-fleet">

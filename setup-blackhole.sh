@@ -581,8 +581,11 @@ RUST_LOG=info
 
 # ── Persistence ───────────────────────────────────────────────────────────────
 DATABASE_URL=sqlite:///data/pool.db?mode=rwc
+SOLO_MODE=true
 PERSIST_BLOCKS=true
 PERSIST_SHARES=false
+PERSIST_BEST=true
+BEST_PERSIST_INTERVAL_SECS=10
 
 # ── Vardiff ────────────────────────────────────────────────────────────────────
 VARDIFF_ENABLED=true
@@ -602,6 +605,7 @@ NOTIFY_BUCKET_CAPACITY=2
 NOTIFY_BUCKET_REFILL_MS=600
 JOB_REFRESH_MS=30000
 TEMPLATE_POLL_MS=30000
+TEMPLATE_MAX_AGE_SECS=30
 
 # ── Coinbase tag (visible on-chain if you find a block) ──────────────────────
 POOL_TAG=/BlockFinder Solo Pool

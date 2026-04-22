@@ -7,6 +7,8 @@ use sqlx::{Row, SqlitePool};
 use tracing::warn;
 use uuid::Uuid;
 
+use crate::metrics::MetricsSnapshot;
+
 #[derive(Clone)]
 pub struct SqliteStore {
     pool: Option<Arc<SqlitePool>>,
@@ -21,6 +23,67 @@ pub struct ShareRecord {
     pub is_accepted: bool,
     pub latency_ms: i64,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BlockCandidateRecord {
+    pub id: Uuid,
+    pub worker: String,
+    pub payout_address: Option<String>,
+    pub session_id: Option<String>,
+    pub job_id: String,
+    pub height: i64,
+    pub prevhash: String,
+    pub ntime: String,
+    pub nonce: String,
+    pub version: String,
+    pub version_mask: String,
+    pub extranonce1: Option<String>,
+    pub extranonce2: String,
+    pub merkle_root: String,
+    pub coinbase_hex: Option<String>,
+    pub block_header_hex: String,
+    pub block_hex: Option<String>,
+    pub full_block_hex: Option<String>,
+    pub block_hash: String,
+    pub submitted_difficulty: f64,
+    pub network_difficulty: f64,
+    pub current_share_difficulty: f64,
+    pub submitblock_requested_at: DateTime<Utc>,
+    pub submitblock_result: String,
+    pub submitblock_latency_ms: i64,
+    pub rpc_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BlockCandidateRow {
+    pub timestamp: String,
+    pub worker: String,
+    pub payout_address: Option<String>,
+    pub session_id: Option<String>,
+    pub job_id: String,
+    pub height: i64,
+    pub prevhash: String,
+    pub ntime: String,
+    pub nonce: String,
+    pub version: String,
+    pub version_mask: String,
+    pub extranonce1: Option<String>,
+    pub extranonce2: String,
+    pub merkle_root: String,
+    pub coinbase_hex: Option<String>,
+    pub block_header_hex: String,
+    pub block_hex: Option<String>,
+    pub full_block_hex: Option<String>,
+    pub block_hash: String,
+    pub submitted_difficulty: f64,
+    pub network_difficulty: f64,
+    pub current_share_difficulty: f64,
+    pub submitblock_requested_at: String,
+    pub submitblock_result: String,
+    pub submitblock_latency_ms: i64,
+    pub rpc_error: Option<String>,
 }
 
 impl SqliteStore {
@@ -100,6 +163,42 @@ impl SqliteStore {
         .execute(pool.as_ref())
         .await?;
 
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS block_candidates (
+                id TEXT PRIMARY KEY,
+                worker TEXT NOT NULL,
+                payout_address TEXT,
+                session_id TEXT,
+                job_id TEXT NOT NULL,
+                height INTEGER NOT NULL,
+                prevhash TEXT NOT NULL,
+                ntime TEXT NOT NULL,
+                nonce TEXT NOT NULL,
+                version TEXT NOT NULL,
+                version_mask TEXT NOT NULL,
+                extranonce1 TEXT,
+                extranonce2 TEXT NOT NULL,
+                merkle_root TEXT NOT NULL,
+                coinbase_hex TEXT,
+                block_header_hex TEXT NOT NULL,
+                block_hex TEXT,
+                full_block_hex TEXT,
+                block_hash TEXT NOT NULL,
+                submitted_difficulty REAL NOT NULL,
+                network_difficulty REAL NOT NULL,
+                current_share_difficulty REAL NOT NULL,
+                submitblock_requested_at TEXT NOT NULL,
+                submitblock_result TEXT NOT NULL,
+                submitblock_latency_ms INTEGER NOT NULL,
+                rpc_error TEXT,
+                created_at TEXT NOT NULL
+            );
+            "#,
+        )
+        .execute(pool.as_ref())
+        .await?;
+
         self.ensure_blocks_found_by_column().await?;
 
         sqlx::query(
@@ -128,12 +227,79 @@ impl SqliteStore {
             CREATE TABLE IF NOT EXISTS worker_best (
                 worker       TEXT PRIMARY KEY,
                 best_diff    REAL NOT NULL DEFAULT 0,
+                best_submitted_diff REAL NOT NULL DEFAULT 0,
+                best_accepted_diff REAL NOT NULL DEFAULT 0,
+                best_block_candidate_diff REAL NOT NULL DEFAULT 0,
                 updated_at   TEXT NOT NULL
             );
             "#,
         )
         .execute(pool.as_ref())
         .await?;
+
+        self.ensure_worker_best_columns().await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS best_summaries (
+                scope_kind   TEXT NOT NULL,
+                scope_key    TEXT PRIMARY KEY,
+                worker       TEXT,
+                session_id   TEXT,
+                height       INTEGER,
+                prevhash     TEXT,
+                template_key TEXT,
+                job_id       TEXT,
+                created_at   TEXT,
+                best_submitted_diff REAL NOT NULL DEFAULT 0,
+                best_accepted_diff  REAL NOT NULL DEFAULT 0,
+                best_block_candidate_diff REAL NOT NULL DEFAULT 0,
+                updated_at   TEXT NOT NULL
+            );
+            "#,
+        )
+        .execute(pool.as_ref())
+        .await?;
+
+        Ok(())
+    }
+
+    async fn ensure_worker_best_columns(&self) -> anyhow::Result<()> {
+        let Some(pool) = &self.pool else {
+            return Ok(());
+        };
+
+        let rows = sqlx::query("PRAGMA table_info(worker_best)")
+            .fetch_all(pool.as_ref())
+            .await?;
+        let has_best_submitted = rows.iter().any(|row| {
+            let name: String = row.get("name");
+            name == "best_submitted_diff"
+        });
+        let has_best_accepted = rows.iter().any(|row| {
+            let name: String = row.get("name");
+            name == "best_accepted_diff"
+        });
+        let has_best_candidate = rows.iter().any(|row| {
+            let name: String = row.get("name");
+            name == "best_block_candidate_diff"
+        });
+
+        if !has_best_submitted {
+            sqlx::query("ALTER TABLE worker_best ADD COLUMN best_submitted_diff REAL NOT NULL DEFAULT 0")
+                .execute(pool.as_ref())
+                .await?;
+        }
+        if !has_best_accepted {
+            sqlx::query("ALTER TABLE worker_best ADD COLUMN best_accepted_diff REAL NOT NULL DEFAULT 0")
+                .execute(pool.as_ref())
+                .await?;
+        }
+        if !has_best_candidate {
+            sqlx::query("ALTER TABLE worker_best ADD COLUMN best_block_candidate_diff REAL NOT NULL DEFAULT 0")
+                .execute(pool.as_ref())
+                .await?;
+        }
 
         Ok(())
     }
@@ -162,22 +328,35 @@ impl SqliteStore {
 
     /// Update (or insert) the all-time best difficulty for a worker.
     /// Only called when a new best is reached, so it is very infrequent.
-    pub async fn upsert_worker_best(&self, worker: &str, best_diff: f64) -> anyhow::Result<()> {
+    pub async fn upsert_worker_best(
+        &self,
+        worker: &str,
+        best_submitted: f64,
+        best_accepted: f64,
+        best_block_candidate: f64,
+    ) -> anyhow::Result<()> {
         let Some(pool) = &self.pool else {
             return Ok(());
         };
         sqlx::query(
             r#"
-            INSERT INTO worker_best (worker, best_diff, updated_at)
-            VALUES (?1, ?2, ?3)
+            INSERT INTO worker_best (
+                worker, best_diff, best_submitted_diff, best_accepted_diff,
+                best_block_candidate_diff, updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
             ON CONFLICT(worker) DO UPDATE SET
-                best_diff  = excluded.best_diff,
+                best_diff  = MAX(worker_best.best_diff, excluded.best_submitted_diff),
+                best_submitted_diff = MAX(worker_best.best_submitted_diff, excluded.best_submitted_diff),
+                best_accepted_diff = MAX(worker_best.best_accepted_diff, excluded.best_accepted_diff),
+                best_block_candidate_diff = MAX(worker_best.best_block_candidate_diff, excluded.best_block_candidate_diff),
                 updated_at = excluded.updated_at
-            WHERE excluded.best_diff > worker_best.best_diff
             "#,
         )
         .bind(worker)
-        .bind(best_diff)
+        .bind(best_submitted)
+        .bind(best_accepted)
+        .bind(best_block_candidate)
         .bind(Utc::now().to_rfc3339())
         .execute(pool.as_ref())
         .await?;
@@ -185,20 +364,202 @@ impl SqliteStore {
     }
 
     /// Load all persisted best difficulties at pool startup.
-    pub async fn load_worker_bests(&self) -> anyhow::Result<HashMap<String, f64>> {
+    pub async fn load_worker_bests(&self) -> anyhow::Result<HashMap<String, (f64, f64, f64)>> {
         let Some(pool) = &self.pool else {
             return Ok(HashMap::new());
         };
-        let rows = sqlx::query("SELECT worker, best_diff FROM worker_best")
+        let rows = sqlx::query(
+            r#"
+            SELECT worker,
+                   COALESCE(best_submitted_diff, best_diff, 0) AS best_submitted_diff,
+                   COALESCE(best_accepted_diff, best_diff, 0) AS best_accepted_diff,
+                   COALESCE(best_block_candidate_diff, 0) AS best_block_candidate_diff
+            FROM worker_best
+            "#,
+        )
             .fetch_all(pool.as_ref())
             .await?;
         let mut out = HashMap::with_capacity(rows.len());
         for row in rows {
             let worker: String = row.get("worker");
-            let diff: f64 = row.get("best_diff");
-            out.insert(worker, diff);
+            let best_submitted: f64 = row.get("best_submitted_diff");
+            let best_accepted: f64 = row.get("best_accepted_diff");
+            let best_block_candidate: f64 = row.get("best_block_candidate_diff");
+            out.insert(worker, (best_submitted, best_accepted, best_block_candidate));
         }
         Ok(out)
+    }
+
+    pub async fn persist_best_snapshot(
+        &self,
+        snapshot: &MetricsSnapshot,
+    ) -> anyhow::Result<()> {
+        let Some(_pool) = &self.pool else {
+            return Ok(());
+        };
+
+        let global_created_at = snapshot.current_scope.created_at.to_rfc3339();
+        let current_created_at = snapshot.current_scope.created_at.to_rfc3339();
+        let previous_created_at = snapshot.previous_scope.as_ref().map(|s| s.created_at.to_rfc3339());
+
+        for miner in &snapshot.miners {
+            let miner_last_seen = miner.last_seen.to_rfc3339();
+            let miner_session_created_at = miner
+                .session_start
+                .as_ref()
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_else(|| miner_last_seen.clone());
+            self.upsert_worker_best(
+                &miner.worker,
+                miner.best_submitted_difficulty,
+                miner.best_accepted_difficulty,
+                miner.best_block_candidate_difficulty,
+            ).await?;
+
+            if let Some(session_id) = miner.session_id.as_deref() {
+                let scope_key = format!("session:{worker}:{session}", worker = miner.worker.as_str(), session = session_id);
+                self.upsert_best_summary(
+                    "session",
+                    &scope_key,
+                    Some(&miner.worker),
+                    Some(session_id),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(miner_session_created_at.as_str()),
+                    miner.session_best_submitted_difficulty,
+                    miner.session_best_accepted_difficulty,
+                    miner.best_block_candidate_difficulty,
+                ).await?;
+            }
+        }
+
+        let global_key = "global";
+        self.upsert_best_summary(
+            "global",
+            global_key,
+            None,
+            None,
+            Some(snapshot.current_scope.height as i64),
+            Some(snapshot.current_scope.prevhash.as_str()),
+            Some(snapshot.current_scope.template_key.as_str()),
+            Some(snapshot.current_scope.job_id.as_str()),
+            Some(global_created_at.as_str()),
+            snapshot.global_best_submitted_difficulty,
+            snapshot.global_best_accepted_difficulty,
+            snapshot.global_best_block_candidate_difficulty,
+        ).await?;
+
+        let current_key = format!(
+            "{}:{}:{}:{}",
+            snapshot.current_scope.height,
+            snapshot.current_scope.prevhash,
+            snapshot.current_scope.template_key,
+            snapshot.current_scope.job_id,
+        );
+        self.upsert_best_summary(
+            "current_block",
+            &current_key,
+            None,
+            None,
+            Some(snapshot.current_scope.height as i64),
+            Some(snapshot.current_scope.prevhash.as_str()),
+            Some(snapshot.current_scope.template_key.as_str()),
+            Some(snapshot.current_scope.job_id.as_str()),
+            Some(current_created_at.as_str()),
+            snapshot.current_block_best_submitted_difficulty,
+            snapshot.current_block_best_accepted_difficulty,
+            snapshot.current_block_best_candidate_difficulty,
+        ).await?;
+
+        if let Some(previous) = &snapshot.previous_scope {
+            let previous_key = format!(
+                "{}:{}:{}:{}",
+                previous.height,
+                previous.prevhash,
+                previous.template_key,
+                previous.job_id,
+            );
+            self.upsert_best_summary(
+                "previous_block",
+                &previous_key,
+                None,
+                None,
+                Some(previous.height as i64),
+                Some(previous.prevhash.as_str()),
+                Some(previous.template_key.as_str()),
+                Some(previous.job_id.as_str()),
+                Some(previous_created_at.as_deref().unwrap_or("")),
+                snapshot.previous_block_best_submitted_difficulty,
+                snapshot.previous_block_best_accepted_difficulty,
+                snapshot.previous_block_best_candidate_difficulty,
+            ).await?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn upsert_best_summary(
+        &self,
+        scope_kind: &str,
+        scope_key: &str,
+        worker: Option<&str>,
+        session_id: Option<&str>,
+        height: Option<i64>,
+        prevhash: Option<&str>,
+        template_key: Option<&str>,
+        job_id: Option<&str>,
+        created_at: Option<&str>,
+        best_submitted: f64,
+        best_accepted: f64,
+        best_block_candidate: f64,
+    ) -> anyhow::Result<()> {
+        let Some(pool) = &self.pool else {
+            return Ok(());
+        };
+
+        sqlx::query(
+            r#"
+            INSERT INTO best_summaries (
+                scope_kind, scope_key, worker, session_id, height, prevhash,
+                template_key, job_id, created_at,
+                best_submitted_diff, best_accepted_diff, best_block_candidate_diff,
+                updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            ON CONFLICT(scope_key) DO UPDATE SET
+                scope_kind = excluded.scope_kind,
+                worker = excluded.worker,
+                session_id = excluded.session_id,
+                height = excluded.height,
+                prevhash = excluded.prevhash,
+                template_key = excluded.template_key,
+                job_id = excluded.job_id,
+                created_at = excluded.created_at,
+                best_submitted_diff = MAX(best_summaries.best_submitted_diff, excluded.best_submitted_diff),
+                best_accepted_diff = MAX(best_summaries.best_accepted_diff, excluded.best_accepted_diff),
+                best_block_candidate_diff = MAX(best_summaries.best_block_candidate_diff, excluded.best_block_candidate_diff),
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(scope_kind)
+        .bind(scope_key)
+        .bind(worker)
+        .bind(session_id)
+        .bind(height)
+        .bind(prevhash)
+        .bind(template_key)
+        .bind(job_id)
+        .bind(created_at)
+        .bind(best_submitted)
+        .bind(best_accepted)
+        .bind(best_block_candidate)
+        .bind(Utc::now().to_rfc3339())
+        .execute(pool.as_ref())
+        .await?;
+
+        Ok(())
     }
 
     pub async fn insert_share(&self, record: ShareRecord) -> anyhow::Result<()> {
@@ -255,6 +616,147 @@ impl SqliteStore {
         Ok(())
     }
 
+    pub async fn insert_block_candidate(
+        &self,
+        record: BlockCandidateRecord,
+    ) -> anyhow::Result<()> {
+        let Some(pool) = &self.pool else {
+            return Ok(());
+        };
+
+        sqlx::query(
+            r#"
+            INSERT INTO block_candidates (
+                id, worker, payout_address, session_id, job_id, height, prevhash,
+                ntime, nonce, version, version_mask, extranonce1, extranonce2,
+                merkle_root, coinbase_hex, block_header_hex, block_hex, block_hash,
+                full_block_hex,
+                submitted_difficulty, network_difficulty, current_share_difficulty,
+                submitblock_requested_at, submitblock_result, submitblock_latency_ms,
+                rpc_error, created_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)
+            "#,
+        )
+        .bind(record.id.to_string())
+        .bind(record.worker)
+        .bind(record.payout_address)
+        .bind(record.session_id)
+        .bind(record.job_id)
+        .bind(record.height)
+        .bind(record.prevhash)
+        .bind(record.ntime)
+        .bind(record.nonce)
+        .bind(record.version)
+        .bind(record.version_mask)
+        .bind(record.extranonce1)
+        .bind(record.extranonce2)
+        .bind(record.merkle_root)
+        .bind(record.coinbase_hex)
+        .bind(record.block_header_hex)
+        .bind(record.block_hex)
+        .bind(record.full_block_hex)
+        .bind(record.block_hash)
+        .bind(record.submitted_difficulty)
+        .bind(record.network_difficulty)
+        .bind(record.current_share_difficulty)
+        .bind(record.submitblock_requested_at)
+        .bind(record.submitblock_result)
+        .bind(record.submitblock_latency_ms)
+        .bind(record.rpc_error)
+        .bind(record.created_at)
+        .execute(pool.as_ref())
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn update_block_candidate_result(
+        &self,
+        id: Uuid,
+        submitblock_result: &str,
+        submitblock_latency_ms: i64,
+        rpc_error: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let Some(pool) = &self.pool else {
+            return Ok(());
+        };
+
+        sqlx::query(
+            r#"
+            UPDATE block_candidates
+               SET submitblock_result = ?2,
+                   submitblock_latency_ms = ?3,
+                   rpc_error = ?4
+             WHERE id = ?1
+            "#,
+        )
+        .bind(id.to_string())
+        .bind(submitblock_result)
+        .bind(submitblock_latency_ms)
+        .bind(rpc_error)
+        .execute(pool.as_ref())
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn fetch_block_candidates(&self, limit: i64) -> anyhow::Result<Vec<BlockCandidateRow>> {
+        let Some(pool) = &self.pool else {
+            return Ok(vec![]);
+        };
+
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                created_at, worker, payout_address, session_id, job_id, height, prevhash,
+                ntime, nonce, version, version_mask, extranonce1, extranonce2,
+                merkle_root, coinbase_hex, block_header_hex, block_hex, full_block_hex,
+                block_hash, submitted_difficulty, network_difficulty, current_share_difficulty,
+                submitblock_requested_at, submitblock_result, submitblock_latency_ms, rpc_error
+            FROM block_candidates
+            ORDER BY created_at DESC
+            LIMIT ?1
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(pool.as_ref())
+        .await?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            out.push(BlockCandidateRow {
+                timestamp: row.get("created_at"),
+                worker: row.get("worker"),
+                payout_address: row.try_get("payout_address")?,
+                session_id: row.try_get("session_id")?,
+                job_id: row.get("job_id"),
+                height: row.get("height"),
+                prevhash: row.get("prevhash"),
+                ntime: row.get("ntime"),
+                nonce: row.get("nonce"),
+                version: row.get("version"),
+                version_mask: row.get("version_mask"),
+                extranonce1: row.try_get("extranonce1")?,
+                extranonce2: row.get("extranonce2"),
+                merkle_root: row.get("merkle_root"),
+                coinbase_hex: row.try_get("coinbase_hex")?,
+                block_header_hex: row.get("block_header_hex"),
+                block_hex: row.try_get("block_hex")?,
+                full_block_hex: row.try_get("full_block_hex")?,
+                block_hash: row.get("block_hash"),
+                submitted_difficulty: row.get("submitted_difficulty"),
+                network_difficulty: row.get("network_difficulty"),
+                current_share_difficulty: row.get("current_share_difficulty"),
+                submitblock_requested_at: row.get("submitblock_requested_at"),
+                submitblock_result: row.get("submitblock_result"),
+                submitblock_latency_ms: row.get("submitblock_latency_ms"),
+                rpc_error: row.try_get("rpc_error")?,
+            });
+        }
+        Ok(out)
+    }
+
     pub async fn fetch_blocks(&self, limit: i64) -> anyhow::Result<Vec<(i64, String, Option<String>, String, String)>> {
         let Some(pool) = &self.pool else {
             return Ok(vec![]);
@@ -296,4 +798,61 @@ fn sqlite_path(url: &str) -> Option<PathBuf> {
     }
     let path = remainder.split('?').next().unwrap_or(remainder);
     Some(PathBuf::from(path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn block_candidate_round_trip_persists_forensic_fields() {
+        let store = SqliteStore::connect(Some("sqlite::memory:"))
+            .await
+            .expect("memory sqlite store");
+
+        let requested_at = Utc::now();
+        let record = BlockCandidateRecord {
+            id: Uuid::new_v4(),
+            worker: "miner-1".to_string(),
+            payout_address: Some("bc1qtest".to_string()),
+            session_id: Some("session-1".to_string()),
+            job_id: "job-1".to_string(),
+            height: 123,
+            prevhash: "00ff".to_string(),
+            ntime: "5f5e100".to_string(),
+            nonce: "00000001".to_string(),
+            version: "20000000".to_string(),
+            version_mask: "1fffe000".to_string(),
+            extranonce1: Some("abcd".to_string()),
+            extranonce2: "ef01".to_string(),
+            merkle_root: "deadbeef".to_string(),
+            coinbase_hex: Some("0100".to_string()),
+            block_header_hex: "0200".to_string(),
+            block_hex: Some("0300".to_string()),
+            full_block_hex: Some("0300".to_string()),
+            block_hash: "hash".to_string(),
+            submitted_difficulty: 42.0,
+            network_difficulty: 100.0,
+            current_share_difficulty: 21.0,
+            submitblock_requested_at: requested_at,
+            submitblock_result: "pending".to_string(),
+            submitblock_latency_ms: 0,
+            rpc_error: None,
+            created_at: requested_at,
+        };
+
+        store.insert_block_candidate(record.clone()).await.expect("insert candidate");
+        store
+            .update_block_candidate_result(record.id, "submitted", 17, None)
+            .await
+            .expect("update candidate");
+
+        let rows = store.fetch_block_candidates(10).await.expect("fetch candidates");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].worker, "miner-1");
+        assert_eq!(rows[0].block_hash, "hash");
+        assert_eq!(rows[0].submitblock_result, "submitted");
+        assert_eq!(rows[0].submitblock_latency_ms, 17);
+        assert_eq!(rows[0].full_block_hex.as_deref(), Some("0300"));
+    }
 }

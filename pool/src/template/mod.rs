@@ -1,5 +1,5 @@
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -14,7 +14,7 @@ use tracing::{info, warn};
 
 use crate::config::Config;
 use crate::hash::{double_sha256, merkle_step};
-use crate::metrics::PoolCounters;
+use crate::metrics::{MetricsStore, PoolCounters};
 use crate::rpc::RpcClient;
 
 #[derive(Debug, Clone)]
@@ -171,12 +171,19 @@ pub struct TemplateEngine {
     last_longpollid: Arc<Mutex<Option<String>>>,
     /// Shared pool-wide counters (ZMQ activity, job storms, etc.).
     counters: Arc<PoolCounters>,
+    /// Metrics store used to rotate per-block best-share scopes when templates change.
+    metrics: MetricsStore,
+    template_refresh_failures: Arc<AtomicU64>,
+    rpc_healthy: Arc<AtomicBool>,
+    last_template_refresh_ms: Arc<AtomicI64>,
+    zmq_connected: Arc<AtomicBool>,
 }
 
 impl TemplateEngine {
     pub fn new(
         config: Config,
         rpc: RpcClient,
+        metrics: MetricsStore,
         counters: Arc<PoolCounters>,
     ) -> Self {
         let (sender, _) = watch::channel(Arc::new(JobTemplate::empty()));
@@ -193,12 +200,71 @@ impl TemplateEngine {
             last_zmq_trigger_ms: Arc::new(AtomicU64::new(0)),
             post_block_suppress_until_ms: Arc::new(AtomicU64::new(0)),
             last_longpollid: Arc::new(Mutex::new(None)),
+            metrics,
             counters,
+            template_refresh_failures: Arc::new(AtomicU64::new(0)),
+            rpc_healthy: Arc::new(AtomicBool::new(false)),
+            last_template_refresh_ms: Arc::new(AtomicI64::new(0)),
+            zmq_connected: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub fn subscribe(&self) -> watch::Receiver<Arc<JobTemplate>> {
         self.sender.subscribe()
+    }
+
+    pub fn last_zmq_block_trigger_at(&self) -> Option<DateTime<Utc>> {
+        let ms = self.last_zmq_block_trigger_ms.load(Ordering::Relaxed);
+        if ms == 0 {
+            None
+        } else {
+            DateTime::<Utc>::from_timestamp_millis(ms as i64)
+        }
+    }
+
+    pub fn last_zmq_tx_trigger_at(&self) -> Option<DateTime<Utc>> {
+        let ms = self.last_zmq_trigger_ms.load(Ordering::Relaxed);
+        if ms == 0 {
+            None
+        } else {
+            DateTime::<Utc>::from_timestamp_millis(ms as i64)
+        }
+    }
+
+    pub fn template_age_secs(&self) -> Option<u64> {
+        let job = self.subscribe().borrow().clone();
+        if !job.ready {
+            return None;
+        }
+        let age = (Utc::now() - job.created_at).num_seconds().max(0) as u64;
+        Some(age)
+    }
+
+    pub fn last_template_refresh_at(&self) -> Option<DateTime<Utc>> {
+        let secs = self.last_template_refresh_ms.load(Ordering::Relaxed);
+        DateTime::<Utc>::from_timestamp(secs, 0)
+    }
+
+    pub fn template_refresh_failures(&self) -> u64 {
+        self.template_refresh_failures.load(Ordering::Relaxed)
+    }
+
+    pub fn rpc_healthy(&self) -> bool {
+        self.rpc_healthy.load(Ordering::Relaxed)
+    }
+
+    pub fn zmq_connected(&self) -> bool {
+        self.zmq_connected.load(Ordering::Relaxed)
+    }
+
+    fn note_template_refresh_success(&self) {
+        self.rpc_healthy.store(true, Ordering::Relaxed);
+        self.last_template_refresh_ms.store(Utc::now().timestamp(), Ordering::Relaxed);
+    }
+
+    fn note_template_refresh_failure(&self) {
+        self.template_refresh_failures.fetch_add(1, Ordering::Relaxed);
+        self.rpc_healthy.store(false, Ordering::Relaxed);
     }
 
 
@@ -316,6 +382,7 @@ impl TemplateEngine {
                 Ok(Ok(())) => {
                     eprintln!("blackhole-pool init: connected to bitcoind; initial template loaded");
                     info!("connected to bitcoind; initial template loaded");
+                    self.note_template_refresh_success();
                     return Ok(());
                 }
                 Ok(Err(err)) => {
@@ -529,11 +596,15 @@ impl TemplateEngine {
                 Ok(Ok(gbt)) => {
                     // apply_gbt_response: dedup → build → broadcast. ONE call, no re-fetch.
                     if let Err(err) = self.apply_gbt_response(gbt).await {
+                        engine.note_template_refresh_failure();
                         warn!("longpoll apply_gbt_response failed: {err:?}");
+                    } else {
+                        engine.note_template_refresh_success();
                     }
                     // Loop immediately — no sleep. Core will block the next call.
                 }
                 Ok(Err(err)) => {
+                    self.note_template_refresh_failure();
                     warn!("longpoll GBT call failed: {err:?}; retrying in 5s");
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 }
@@ -577,6 +648,7 @@ impl TemplateEngine {
                     match socket.connect(url) {
                         Ok(_) => {
                             info!("ZMQ block connected: {url}");
+                            engine.zmq_connected.store(true, Ordering::Relaxed);
                             connected = true;
                             // Don't break — connect to all URLs for multi-topic coverage.
                         }
@@ -639,11 +711,11 @@ impl TemplateEngine {
                             engine.counters.inc_zmq_block_received();
                             if engine.should_fire_block_zmq_trigger() {
                                 engine.counters.inc_zmq_blocks_detected();
-                                tokio::spawn(async move {
-                                    if let Err(e) = engine.refresh_template().await {
-                                        warn!("ZMQ block-miss refresh failed: {e:?} — longpoll will recover");
-                                    }
-                                });
+                    tokio::spawn(async move {
+                        if let Err(e) = engine.refresh_template().await {
+                            warn!("ZMQ block-miss refresh failed: {e:?} — longpoll will recover");
+                        }
+                    });
                             }
                         } else {
                             warn!("ZMQ block recv failed (body frame); reconnecting");
@@ -710,6 +782,7 @@ impl TemplateEngine {
                     match socket.connect(url) {
                         Ok(_) => {
                             info!("ZMQ tx connected: {url}");
+                            engine.zmq_connected.store(true, Ordering::Relaxed);
                             connected = true;
                             // Connect to ALL provided endpoints for full coverage.
                         }
@@ -841,6 +914,7 @@ impl TemplateEngine {
         // Build job first; only commit the key after a successful build so a
         // transient failure doesn't "poison" the key and stall future updates.
         let job = self.build_job(gbt, key.clone()).await?;
+        self.metrics.set_template_scope(&job).await;
         info!(
             "new template: height={} txs={} coinbase_value={} sat nbits={}",
             job.height, job.transactions.len(), job.coinbase_value, job.nbits
@@ -862,8 +936,18 @@ impl TemplateEngine {
                 Some(id) if !id.is_empty() => json!([{"rules": ["segwit"], "longpollid": id}]),
                 _ => json!([{"rules": ["segwit"]}]),
             };
-            let gbt: GbtResponse = self.rpc.call("getblocktemplate", gbt_params).await?;
-            self.apply_gbt_response(gbt).await?;
+            let gbt: GbtResponse = match self.rpc.call("getblocktemplate", gbt_params).await {
+                Ok(gbt) => gbt,
+                Err(err) => {
+                    self.note_template_refresh_failure();
+                    return Err(err.into());
+                }
+            };
+            if let Err(err) = self.apply_gbt_response(gbt).await {
+                self.note_template_refresh_failure();
+                return Err(err);
+            }
+            self.note_template_refresh_success();
 
             // ZMQ path: re-run if another trigger arrived while we were fetching.
             // Longpoll path: break — Core already blocked until content changed.

@@ -15,7 +15,7 @@ use crate::build_info::{self, BuildInfo};
 use crate::config::Config;
 use crate::metrics::{MetricsStore, ShareEvent};
 use crate::rpc::RpcClient;
-use crate::storage::SqliteStore;
+use crate::storage::{BlockCandidateRow as SqlBlockCandidateRow, SqliteStore};
 use crate::template::{JobTemplate, TemplateEngine};
 
 #[derive(Clone)]
@@ -69,6 +69,7 @@ impl ApiServer {
             .route("/shares", get(shares))
             .route("/hashrate", get(hashrate))
             .route("/blocks", get(blocks))
+            .route("/block-candidates", get(block_candidates))
             .route("/public-blocks", get(public_blocks))
             .route("/pool", get(pool))
             .route("/network", get(network))
@@ -189,6 +190,20 @@ struct PublicBlockRow {
     pool: Option<String>,
 }
 
+#[derive(Serialize)]
+#[allow(non_snake_case)]
+struct BlockCandidateRow {
+    timestamp: String,
+    worker: String,
+    height: i64,
+    block_hash: String,
+    submitted_difficulty: f64,
+    network_difficulty: f64,
+    submitblock_result: String,
+    submitblock_rpc_latency_ms: i64,
+    rpc_error: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct MempoolBlock {
     id: Option<String>,
@@ -230,6 +245,30 @@ async fn blocks(State(state): State<ApiState>) -> impl IntoResponse {
         })
         .collect::<Vec<_>>();
     Json(blocks)
+}
+
+async fn block_candidates(State(state): State<ApiState>) -> impl IntoResponse {
+    let rows = match state.sqlite.fetch_block_candidates(30).await {
+        Ok(rows) => rows,
+        Err(_) => vec![],
+    };
+
+    let candidates = rows
+        .into_iter()
+        .map(|row: SqlBlockCandidateRow| BlockCandidateRow {
+            timestamp: row.timestamp,
+            worker: row.worker,
+            height: row.height,
+            block_hash: row.block_hash,
+            submitted_difficulty: row.submitted_difficulty,
+            network_difficulty: row.network_difficulty,
+            submitblock_result: row.submitblock_result,
+            submitblock_rpc_latency_ms: row.submitblock_latency_ms,
+            rpc_error: row.rpc_error,
+        })
+        .collect::<Vec<_>>();
+
+    Json(candidates)
 }
 
 async fn public_blocks() -> impl IntoResponse {
@@ -325,6 +364,46 @@ struct PoolInfo {
     zmqTxDebounced: u64,
     zmqTxPostBlockSuppressed: u64,
     staleRatio: f64,
+    submitRttP50Ms: f64,
+    submitRttP95Ms: f64,
+    submitRttP99Ms: f64,
+    submitRttMaxMs: f64,
+    submitRttOver50MsCount: u64,
+    submitRttOver100MsCount: u64,
+    globalBestSubmittedDifficulty: f64,
+    globalBestAcceptedDifficulty: f64,
+    globalBestBlockCandidateDifficulty: f64,
+    publicPoolStyleBest: f64,
+    cgminerStyleBest: f64,
+    rawBest: f64,
+    acceptedBest: f64,
+    currentBlockBestSubmittedDifficulty: f64,
+    currentBlockBestAcceptedDifficulty: f64,
+    currentBlockBestCandidateDifficulty: f64,
+    previousBlockBestSubmittedDifficulty: f64,
+    previousBlockBestAcceptedDifficulty: f64,
+    previousBlockBestCandidateDifficulty: f64,
+    templateMaxAgeSecs: u64,
+    lastTemplateRefreshAt: String,
+    lastZmqBlockAt: Option<String>,
+    lastZmqTxAt: Option<String>,
+    currentTemplateAgeSecs: Option<u64>,
+    templateAgeSecs: Option<u64>,
+    templateStale: bool,
+    zmqConnected: bool,
+    lastCleanJobsNotifyAt: Option<String>,
+    templateRefreshFailures: u64,
+    rpcHealthy: bool,
+    currentBlockHeight: u64,
+    currentBlockPrevhash: String,
+    currentBlockTemplateKey: String,
+    currentBlockJobId: String,
+    currentBlockCreatedAt: String,
+    previousBlockHeight: u64,
+    previousBlockPrevhash: String,
+    previousBlockTemplateKey: String,
+    previousBlockJobId: String,
+    previousBlockCreatedAt: Option<String>,
     /// Bitcoin Core current block height (from getmininginfo).
     /// Reused to populate /network data — no second RPC call needed.
     networkDifficulty: f64,
@@ -388,6 +467,54 @@ async fn pool(State(state): State<ApiState>) -> impl IntoResponse {
         zmqTxDebounced:             c.zmq_tx_debounced(),
         zmqTxPostBlockSuppressed:   c.zmq_tx_post_block_suppressed(),
         staleRatio:             stale_ratio,
+        submitRttP50Ms:         snapshot.submit_rtt_p50_ms,
+        submitRttP95Ms:         snapshot.submit_rtt_p95_ms,
+        submitRttP99Ms:         snapshot.submit_rtt_p99_ms,
+        submitRttMaxMs:         snapshot.submit_rtt_max_ms,
+        submitRttOver50MsCount:  snapshot.submit_rtt_over_50ms_count,
+        submitRttOver100MsCount: snapshot.submit_rtt_over_100ms_count,
+        globalBestSubmittedDifficulty: snapshot.global_best_submitted_difficulty,
+        globalBestAcceptedDifficulty: snapshot.global_best_accepted_difficulty,
+        globalBestBlockCandidateDifficulty: snapshot.global_best_block_candidate_difficulty,
+        publicPoolStyleBest: snapshot.global_best_submitted_difficulty,
+        cgminerStyleBest: snapshot.global_best_accepted_difficulty,
+        rawBest: snapshot.global_best_submitted_difficulty,
+        acceptedBest: snapshot.global_best_accepted_difficulty,
+        currentBlockBestSubmittedDifficulty: snapshot.current_block_best_submitted_difficulty,
+        currentBlockBestAcceptedDifficulty: snapshot.current_block_best_accepted_difficulty,
+        currentBlockBestCandidateDifficulty: snapshot.current_block_best_candidate_difficulty,
+        previousBlockBestSubmittedDifficulty: snapshot.previous_block_best_submitted_difficulty,
+        previousBlockBestAcceptedDifficulty: snapshot.previous_block_best_accepted_difficulty,
+        previousBlockBestCandidateDifficulty: snapshot.previous_block_best_candidate_difficulty,
+        templateMaxAgeSecs: state.config.template_max_age_secs,
+        lastTemplateRefreshAt: state
+            .template_engine
+            .last_template_refresh_at()
+            .unwrap_or(snapshot.current_scope.created_at)
+            .to_rfc3339(),
+        lastZmqBlockAt: state.template_engine.last_zmq_block_trigger_at().map(|dt| dt.to_rfc3339()),
+        lastZmqTxAt: state.template_engine.last_zmq_tx_trigger_at().map(|dt| dt.to_rfc3339()),
+        currentTemplateAgeSecs: state.template_engine.template_age_secs(),
+        templateAgeSecs: state.template_engine.template_age_secs(),
+        templateStale: state
+            .template_engine
+            .template_age_secs()
+            .map(|age| age > state.config.template_max_age_secs)
+            .unwrap_or(true),
+        zmqConnected: state.template_engine.zmq_connected(),
+        lastCleanJobsNotifyAt: state.metrics.counters.last_clean_jobs_notify_at().map(|dt| dt.to_rfc3339()),
+        templateRefreshFailures: state.template_engine.template_refresh_failures(),
+        rpcHealthy: state.template_engine.rpc_healthy(),
+        currentBlockHeight: snapshot.current_scope.height,
+        currentBlockPrevhash: snapshot.current_scope.prevhash.clone(),
+        currentBlockTemplateKey: snapshot.current_scope.template_key.clone(),
+        currentBlockJobId: snapshot.current_scope.job_id.clone(),
+        currentBlockCreatedAt: snapshot.current_scope.created_at.to_rfc3339(),
+        previousBlockHeight: snapshot.previous_scope.as_ref().map(|s| s.height).unwrap_or(0),
+        previousBlockPrevhash: snapshot.previous_scope.as_ref().map(|s| s.prevhash.clone()).unwrap_or_default(),
+        previousBlockTemplateKey: snapshot.previous_scope.as_ref().map(|s| s.template_key.clone()).unwrap_or_default(),
+        previousBlockJobId: snapshot.previous_scope.as_ref().map(|s| s.job_id.clone()).unwrap_or_default(),
+        previousBlockCreatedAt: snapshot.previous_scope.as_ref().map(|s| s.created_at.to_rfc3339()),
         networkDifficulty: mining_info.as_ref().map(|i| i.difficulty).unwrap_or(0.0),
         networkHashps:     mining_info.as_ref().and_then(|i| i.networkhashps).unwrap_or(0.0),
     })
@@ -470,6 +597,13 @@ async fn blackhole_status(State(state): State<ApiState>) -> impl IntoResponse {
 struct BlockFinderMinerList {
     address: String,
     bestDifficulty: f64,
+    bestSubmittedDifficulty: f64,
+    bestAcceptedDifficulty: f64,
+    bestBlockCandidateDifficulty: f64,
+    publicPoolStyleBest: f64,
+    cgminerStyleBest: f64,
+    rawBest: f64,
+    acceptedBest: f64,
     workers: Vec<BlockFinderWorker>,
 }
 
@@ -480,9 +614,22 @@ struct BlockFinderWorker {
     name: String,
     userAgent: Option<String>,
     bestDifficulty: f64,
+    bestSubmittedDifficulty: f64,
+    bestAcceptedDifficulty: f64,
+    bestBlockCandidateDifficulty: f64,
+    publicPoolStyleBest: f64,
+    cgminerStyleBest: f64,
+    rawBest: f64,
+    acceptedBest: f64,
+    currentBlockBestSubmittedDifficulty: f64,
+    currentBlockBestAcceptedDifficulty: f64,
+    currentBlockBestCandidateDifficulty: f64,
     hashRate: f64,
     startTime: Option<String>,
     lastSeen: String,
+    lastShareStatus: Option<String>,
+    lastShareDifficulty: f64,
+    lastShareAt: Option<String>,
 }
 
 async fn blackhole_miners(State(state): State<ApiState>) -> impl IntoResponse {
@@ -491,6 +638,16 @@ async fn blackhole_miners(State(state): State<ApiState>) -> impl IntoResponse {
         .miners
         .iter()
         .map(|m| m.best_submitted_difficulty)
+        .fold(0.0, f64::max);
+    let best_accepted = snapshot
+        .miners
+        .iter()
+        .map(|m| m.best_accepted_difficulty)
+        .fold(0.0, f64::max);
+    let best_candidate = snapshot
+        .miners
+        .iter()
+        .map(|m| m.best_block_candidate_difficulty)
         .fold(0.0, f64::max);
 
     let mut workers = snapshot
@@ -501,9 +658,22 @@ async fn blackhole_miners(State(state): State<ApiState>) -> impl IntoResponse {
             name:           miner.worker,
             userAgent:      miner.user_agent,
             bestDifficulty: miner.best_submitted_difficulty,
+            bestSubmittedDifficulty: miner.best_submitted_difficulty,
+            bestAcceptedDifficulty: miner.best_accepted_difficulty,
+            bestBlockCandidateDifficulty: miner.best_block_candidate_difficulty,
+            publicPoolStyleBest: miner.best_submitted_difficulty,
+            cgminerStyleBest: miner.best_accepted_difficulty,
+            rawBest: miner.best_submitted_difficulty,
+            acceptedBest: miner.best_accepted_difficulty,
+            currentBlockBestSubmittedDifficulty: miner.current_block_best_submitted_difficulty,
+            currentBlockBestAcceptedDifficulty: miner.current_block_best_accepted_difficulty,
+            currentBlockBestCandidateDifficulty: miner.current_block_best_candidate_difficulty,
             hashRate:       miner.hashrate_gh * 1_000_000_000.0,
             startTime:      miner.session_start.map(|t| t.to_rfc3339()),
             lastSeen:       miner.last_seen.to_rfc3339(),
+            lastShareStatus: miner.last_share_status,
+            lastShareDifficulty: miner.last_share_difficulty,
+            lastShareAt: miner.last_share_at.map(|t| t.to_rfc3339()),
         })
         .collect::<Vec<_>>();
 
@@ -512,6 +682,13 @@ async fn blackhole_miners(State(state): State<ApiState>) -> impl IntoResponse {
     Json(BlockFinderMinerList {
         address:        state.config.payout_address.clone(),
         bestDifficulty: best,
+        bestSubmittedDifficulty: best,
+        bestAcceptedDifficulty: best_accepted,
+        bestBlockCandidateDifficulty: best_candidate,
+        publicPoolStyleBest: best,
+        cgminerStyleBest: best_accepted,
+        rawBest: best,
+        acceptedBest: best_accepted,
         workers,
     })
 }
@@ -572,7 +749,7 @@ async fn blackhole_connection_status(State(state): State<ApiState>) -> impl Into
             port,
         },
         zmq: ZmqStatus {
-            enabled: !state.config.zmq_block_urls.is_empty(),
+            enabled: state.template_engine.zmq_connected(),
             host: if state.config.zmq_block_urls.is_empty() {
                 "Not configured".to_string()
             } else {
@@ -629,13 +806,196 @@ async fn blackhole_template_info(State(state): State<ApiState>) -> impl IntoResp
 fn build_share_series(events: Vec<ShareEvent>) -> Vec<HashratePoint> {
     let mut buckets = std::collections::BTreeMap::new();
     for event in events {
-        let key = event.created_at.format("%H:%M").to_string();
+        if !event.accepted {
+            continue;
+        }
+        let key = event.created_at.format("%Y-%m-%dT%H:%M:00Z").to_string();
         *buckets.entry(key).or_insert(0usize) += 1;
     }
     buckets
         .into_iter()
         .map(|(timestamp, shares)| HashratePoint { timestamp, shares })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    #[test]
+    fn build_share_series_counts_accepted_only() {
+        let now = Utc::now();
+        let events = vec![
+            ShareEvent {
+                worker: "miner".to_string(),
+                difficulty: 1.0,
+                accepted: true,
+                is_block: false,
+                submit_rtt_ms: 1.0,
+                created_at: now,
+                job_age_secs: 1,
+                notify_delay_ms: 1,
+                reconnect_recent: false,
+            },
+            ShareEvent {
+                worker: "miner".to_string(),
+                difficulty: 2.0,
+                accepted: false,
+                is_block: false,
+                submit_rtt_ms: 1.0,
+                created_at: now,
+                job_age_secs: 1,
+                notify_delay_ms: 1,
+                reconnect_recent: false,
+            },
+        ];
+
+        let series = build_share_series(events);
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].shares, 1);
+    }
+
+    #[test]
+    fn pool_info_serializes_expected_best_and_health_fields() {
+        let pool = PoolInfo {
+            totalHashRate: 0.0,
+            totalMiners: 0,
+            blockHeight: 0,
+            blocksFound: 0,
+            fee: 0,
+            poolStartedAt: "2026-04-22T00:00:00Z".to_string(),
+            uptimeSecs: 0,
+            jobsSent: 0,
+            cleanJobsSent: 0,
+            jobsSentPerMiner: 0.0,
+            jobsSentPerMinerPerMin: 0.0,
+            notifyDeduped: 0,
+            notifyRateLimited: 0,
+            duplicateShares: 0,
+            reconnectsTotal: 0,
+            submitblockAccepted: 0,
+            submitblockRejected: 0,
+            submitblockRpcFail: 0,
+            versionRollingViolations: 0,
+            stalesNewBlock: 0,
+            stalesExpired: 0,
+            stalesReconnect: 0,
+            zmqBlocksDetected: 0,
+            zmqBlockNotifications: 0,
+            zmqTxTriggered: 0,
+            zmqTxDebounced: 0,
+            zmqTxPostBlockSuppressed: 0,
+            staleRatio: 0.0,
+            submitRttP50Ms: 0.0,
+            submitRttP95Ms: 0.0,
+            submitRttP99Ms: 0.0,
+            submitRttMaxMs: 0.0,
+            submitRttOver50MsCount: 0,
+            submitRttOver100MsCount: 0,
+            globalBestSubmittedDifficulty: 12.0,
+            globalBestAcceptedDifficulty: 11.0,
+            globalBestBlockCandidateDifficulty: 10.0,
+            publicPoolStyleBest: 12.0,
+            cgminerStyleBest: 11.0,
+            rawBest: 12.0,
+            acceptedBest: 11.0,
+            currentBlockBestSubmittedDifficulty: 9.0,
+            currentBlockBestAcceptedDifficulty: 8.0,
+            currentBlockBestCandidateDifficulty: 7.0,
+            previousBlockBestSubmittedDifficulty: 6.0,
+            previousBlockBestAcceptedDifficulty: 5.0,
+            previousBlockBestCandidateDifficulty: 4.0,
+            templateMaxAgeSecs: 30,
+            lastTemplateRefreshAt: "2026-04-22T00:00:00Z".to_string(),
+            lastZmqBlockAt: None,
+            lastZmqTxAt: None,
+            currentTemplateAgeSecs: Some(1),
+            templateAgeSecs: Some(1),
+            templateStale: false,
+            zmqConnected: true,
+            lastCleanJobsNotifyAt: None,
+            templateRefreshFailures: 0,
+            rpcHealthy: true,
+            currentBlockHeight: 123,
+            currentBlockPrevhash: "prev".to_string(),
+            currentBlockTemplateKey: "tmpl".to_string(),
+            currentBlockJobId: "job".to_string(),
+            currentBlockCreatedAt: "2026-04-22T00:00:00Z".to_string(),
+            previousBlockHeight: 122,
+            previousBlockPrevhash: "prev-2".to_string(),
+            previousBlockTemplateKey: "tmpl-2".to_string(),
+            previousBlockJobId: "job-2".to_string(),
+            previousBlockCreatedAt: None,
+            networkDifficulty: 135.0,
+            networkHashps: 42.0,
+        };
+
+        let value = serde_json::to_value(pool).expect("pool serializes");
+        assert_eq!(value["rawBest"], Value::from(12.0));
+        assert_eq!(value["acceptedBest"], Value::from(11.0));
+        assert_eq!(value["currentBlockBestSubmittedDifficulty"], Value::from(9.0));
+        assert_eq!(value["zmqConnected"], Value::from(true));
+        assert_eq!(value["rpcHealthy"], Value::from(true));
+        assert_eq!(value["templateRefreshFailures"], Value::from(0));
+    }
+
+    #[test]
+    fn worker_serializes_expected_best_and_last_share_fields() {
+        let worker = BlockFinderWorker {
+            sessionId: Some("session-1".to_string()),
+            name: "miner-1".to_string(),
+            userAgent: Some("bmminer".to_string()),
+            bestDifficulty: 15.0,
+            bestSubmittedDifficulty: 15.0,
+            bestAcceptedDifficulty: 14.0,
+            bestBlockCandidateDifficulty: 13.0,
+            publicPoolStyleBest: 15.0,
+            cgminerStyleBest: 14.0,
+            rawBest: 15.0,
+            acceptedBest: 14.0,
+            currentBlockBestSubmittedDifficulty: 12.0,
+            currentBlockBestAcceptedDifficulty: 11.0,
+            currentBlockBestCandidateDifficulty: 10.0,
+            hashRate: 1_000.0,
+            startTime: Some("2026-04-22T00:00:00Z".to_string()),
+            lastSeen: "2026-04-22T00:00:00Z".to_string(),
+            lastShareStatus: Some("accepted".to_string()),
+            lastShareDifficulty: 9.0,
+            lastShareAt: Some("2026-04-22T00:00:00Z".to_string()),
+        };
+
+        let value = serde_json::to_value(worker).expect("worker serializes");
+        assert_eq!(value["rawBest"], Value::from(15.0));
+        assert_eq!(value["acceptedBest"], Value::from(14.0));
+        assert_eq!(value["lastShareStatus"], Value::from("accepted"));
+        assert_eq!(value["lastShareDifficulty"], Value::from(9.0));
+        assert_eq!(value["lastShareAt"], Value::from("2026-04-22T00:00:00Z"));
+    }
+
+    #[test]
+    fn block_candidate_row_serializes_public_fields() {
+        let candidate = BlockCandidateRow {
+            timestamp: "2026-04-22T00:00:00Z".to_string(),
+            worker: "miner-1".to_string(),
+            height: 123,
+            block_hash: "hash".to_string(),
+            submitted_difficulty: 42.0,
+            network_difficulty: 100.0,
+            submitblock_result: "submitted".to_string(),
+            submitblock_rpc_latency_ms: 17,
+            rpc_error: Some("rpc failed".to_string()),
+        };
+
+        let value = serde_json::to_value(candidate).expect("candidate serializes");
+        assert_eq!(value["timestamp"], Value::from("2026-04-22T00:00:00Z"));
+        assert_eq!(value["worker"], Value::from("miner-1"));
+        assert_eq!(value["height"], Value::from(123));
+        assert_eq!(value["block_hash"], Value::from("hash"));
+        assert_eq!(value["submitblock_result"], Value::from("submitted"));
+        assert_eq!(value["submitblock_rpc_latency_ms"], Value::from(17));
+        assert_eq!(value["rpc_error"], Value::from("rpc failed"));
+    }
 }
 
 async fn fetch_mining_info(rpc: &RpcClient) -> anyhow::Result<MiningInfo> {

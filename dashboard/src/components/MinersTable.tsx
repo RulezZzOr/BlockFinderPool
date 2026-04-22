@@ -59,7 +59,7 @@ export default function MinersTable({ miners }: Props) {
     );
   }
 
-  const globalBest = Math.max(...miners.map((m) => m.best_difficulty ?? 0));
+  const globalBest = Math.max(...miners.map((m) => m.best_submitted_difficulty ?? 0));
 
   return (
     <div className="card table-card">
@@ -73,7 +73,9 @@ export default function MinersTable({ miners }: Props) {
               <th>Worker</th>
               <th>Hashrate</th>
               <th>Difficulty</th>
-              <th>Best Diff ★</th>
+              <th title="Highest difficulty hash submitted by the miner, including stale/rejected shares if they were parsed successfully.">Raw Best Submitted ★</th>
+              <th title="Highest share accepted by the configured pool difficulty rules.">Accepted Best</th>
+              <th title="Best share since the current prevhash/template.">Current Block Best</th>
               <th>Shares</th>
               <th>Stale</th>
               <th>Rejected</th>
@@ -84,8 +86,10 @@ export default function MinersTable({ miners }: Props) {
           </thead>
           <tbody>
             {miners.map((m) => {
-              const best = m.best_difficulty ?? 0;
+              const best = m.best_submitted_difficulty ?? 0;
               const isTopBest = best > 0 && best === globalBest;
+              const bestAccepted = m.best_accepted_difficulty ?? 0;
+              const bestBlock = m.current_block_best_submitted_difficulty ?? 0;
               const stale = m.stale ?? 0;
               const hashCycle = m.notify_to_submit_ms ?? 0;
               const rtt       = m.submit_rtt_ms ?? 0;
@@ -126,6 +130,8 @@ export default function MinersTable({ miners }: Props) {
                     </span>
                     {isTopBest && <span className="best-star">★</span>}
                   </td>
+                  <td className="num-green">{fmtBest(bestAccepted)}</td>
+                  <td className="num-cyan">{fmtBest(bestBlock)}</td>
 
                   {/* Shares */}
                   <td className="num-green">{m.shares.toLocaleString()}</td>
@@ -148,7 +154,9 @@ export default function MinersTable({ miners }: Props) {
                   <td className={rttColor}>{rtt < 1 ? "<1" : rtt.toFixed(0)} ms</td>
 
                   {/* Last Share */}
-                  <td className="num-dim">{relTime(m.last_share_time ?? m.last_seen)}</td>
+                  <td className="num-dim" title={`${m.last_share_status ?? "unknown"} @ ${fmtBest(m.last_share_difficulty ?? 0)}`}>
+                    {relTime(m.last_share_at ?? m.last_share_time ?? m.last_seen)}
+                  </td>
                 </tr>
               );
             })}
