@@ -55,9 +55,9 @@ bash setup-blackhole.sh --unattended
 | Step | Action |
 |------|--------|
 | 1 | Checks Docker + Docker Compose |
-| 2 | Detects Umbrel / standalone environment |
+| 2 | Detects local/standalone deployment mode |
 | 3 | Finds Bitcoin Core (Docker container or native) |
-| 4 | Reads RPC credentials from bitcoin.conf / Umbrel .env |
+| 4 | Reads RPC credentials from bitcoin.conf or node config |
 | 5 | Tests RPC connectivity |
 | 6 | Optionally adds ZMQ lines to bitcoin.conf and restarts Core |
 | 7 | Asks for your payout Bitcoin address |
@@ -87,7 +87,7 @@ cp env/.env.example env/.env
 
 ### 3. Start the pool
 
-**Umbrel:**
+**Automatic setup:**
 ```bash
 bash run.sh
 ```
@@ -139,29 +139,29 @@ Configure your miner with:
 
 All settings live in `env/.env`. Copy `env/.env.example` to `env/.env` as shown above.
 
-### Finding your Bitcoin Core RPC credentials (Umbrel)
+### Finding your Bitcoin Core RPC credentials (local node)
 
-1. Open your Umbrel dashboard → **Bitcoin Node** app
-2. Go to **Connect** or **Advanced** tab
-3. Or read them directly from your node:
+1. Open your node's Bitcoin Core settings or node dashboard
+2. Find the RPC credentials and ZMQ settings
+3. Or read them directly from the host:
 
 ```bash
-# SSH into Umbrel, then:
-cat ~/umbrel/app-data/bitcoin/data/bitcoin/bitcoin.conf | grep -E "rpc|zmq"
+# SSH into your Bitcoin node host, then:
+grep -E "rpc|zmq" /path/to/bitcoin.conf
 ```
 
 | `.env` variable | Where to find it |
 |---|---|
-| `RPC_URL` | `http://<umbrel-ip>:8332` — on Umbrel the internal Docker IP is `10.21.21.8` |
-| `RPC_USER` | Usually `umbrel` |
+| `RPC_URL` | `http://<node-ip>:8332` |
+| `RPC_USER` | The RPC user from `bitcoin.conf` |
 | `RPC_PASS` | The long base64 string in `bitcoin.conf` under `rpcpassword=` |
-| `ZMQ_BLOCKS` | `tcp://<umbrel-ip>:28334` |
-| `ZMQ_TXS` | `tcp://<umbrel-ip>:28336` |
+| `ZMQ_BLOCKS` | `tcp://<node-ip>:28334` |
+| `ZMQ_TXS` | `tcp://<node-ip>:28336` |
 
 ### Enabling ZMQ on Bitcoin Core
 
 ZMQ is required for low-latency block notifications (reduces stale shares).
-On Umbrel it is enabled by default. On a custom node, add to `bitcoin.conf`:
+Add to your node's `bitcoin.conf`:
 
 ```ini
 zmqpubhashblock=tcp://0.0.0.0:28334
@@ -170,13 +170,10 @@ zmqpubhashtx=tcp://0.0.0.0:28336
 
 Then restart Bitcoin Core.
 
-### Network (Umbrel Docker)
+### Network
 
-The pool runs inside `umbrel_main_network` (the same Docker network as Umbrel's
-Bitcoin Core container). This is why the RPC/ZMQ IPs use `10.21.21.8` — that is
-Bitcoin Core's fixed IP inside the Umbrel network.
-
-If you run outside Umbrel, change `RPC_URL` and `ZMQ_*` to your node's actual IP.
+If your Bitcoin Core node is on the same host or LAN, set `RPC_URL` and `ZMQ_*`
+to the node's actual IP or `127.0.0.1` when using host networking.
 
 ### Payout address
 
@@ -348,7 +345,7 @@ Measured GBT tail latency (p95):
 - v30.0.0: ~80ms (occasionally spikes to 565ms)
 - v30.2.0: ~50ms (more consistent)
 
-On Umbrel: upgrade via the Umbrel UI → Bitcoin Node → Update.
+Upgrade your node using its normal update path.
 
 ### `PERSIST_SHARES`
 
@@ -408,8 +405,8 @@ per-miner bucket — no artificial delays, no wasted refills.
 
 ## API Reference
 
- The REST API is available on **port 8080** in standalone/solo mode, or **8081** when
- mapped behind Umbrel.
+ The REST API is available on **port 8080** in standalone/solo mode, or **8081**
+ when routed through the Docker bridge setup.
 
 | Endpoint | Description |
 |---|---|
