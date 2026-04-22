@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use sqlx::{Row, SqlitePool};
+use serde::Serialize;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -56,7 +57,7 @@ pub struct BlockCandidateRecord {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct BlockCandidateRow {
     pub timestamp: String,
     pub worker: String,
@@ -730,8 +731,8 @@ impl SqliteStore {
         .bind(record.coinbase_hex)
         .bind(record.block_header_hex)
         .bind(record.block_hex)
-        .bind(record.full_block_hex)
         .bind(record.block_hash)
+        .bind(record.full_block_hex)
         .bind(record.submitted_difficulty)
         .bind(record.network_difficulty)
         .bind(record.current_share_difficulty)
@@ -832,6 +833,60 @@ impl SqliteStore {
         Ok(out)
     }
 
+    pub async fn fetch_block_candidate(
+        &self,
+        id: Uuid,
+    ) -> anyhow::Result<Option<BlockCandidateRow>> {
+        let Some(pool) = &self.pool else {
+            return Ok(None);
+        };
+
+        let row = sqlx::query(
+            r#"
+            SELECT
+                created_at, worker, payout_address, session_id, job_id, height, prevhash,
+                ntime, nonce, version, version_mask, extranonce1, extranonce2,
+                merkle_root, coinbase_hex, block_header_hex, block_hex, full_block_hex,
+                block_hash, submitted_difficulty, network_difficulty, current_share_difficulty,
+                submitblock_requested_at, submitblock_result, submitblock_latency_ms, rpc_error
+            FROM block_candidates
+            WHERE id = ?1
+            "#,
+        )
+        .bind(id.to_string())
+        .fetch_optional(pool.as_ref())
+        .await?;
+
+        Ok(row.map(|row| BlockCandidateRow {
+            timestamp: row.get("created_at"),
+            worker: row.get("worker"),
+            payout_address: row.try_get("payout_address").ok(),
+            session_id: row.try_get("session_id").ok(),
+            job_id: row.get("job_id"),
+            height: row.get("height"),
+            prevhash: row.get("prevhash"),
+            ntime: row.get("ntime"),
+            nonce: row.get("nonce"),
+            version: row.get("version"),
+            version_mask: row.get("version_mask"),
+            extranonce1: row.try_get("extranonce1").ok(),
+            extranonce2: row.get("extranonce2"),
+            merkle_root: row.get("merkle_root"),
+            coinbase_hex: row.try_get("coinbase_hex").ok(),
+            block_header_hex: row.get("block_header_hex"),
+            block_hex: row.try_get("block_hex").ok(),
+            full_block_hex: row.try_get("full_block_hex").ok(),
+            block_hash: row.get("block_hash"),
+            submitted_difficulty: row.get("submitted_difficulty"),
+            network_difficulty: row.get("network_difficulty"),
+            current_share_difficulty: row.get("current_share_difficulty"),
+            submitblock_requested_at: row.get("submitblock_requested_at"),
+            submitblock_result: row.get("submitblock_result"),
+            submitblock_latency_ms: row.get("submitblock_latency_ms"),
+            rpc_error: row.try_get("rpc_error").ok(),
+        }))
+    }
+
     pub async fn fetch_blocks(&self, limit: i64) -> anyhow::Result<Vec<(i64, String, Option<String>, String, String)>> {
         let Some(pool) = &self.pool else {
             return Ok(vec![]);
@@ -929,5 +984,15 @@ mod tests {
         assert_eq!(rows[0].submitblock_result, "submitted");
         assert_eq!(rows[0].submitblock_latency_ms, 17);
         assert_eq!(rows[0].full_block_hex.as_deref(), Some("0300"));
+
+        let fetched = store
+            .fetch_block_candidate(record.id)
+            .await
+            .expect("fetch candidate by id");
+        assert_eq!(fetched.as_ref().map(|row| row.block_hash.as_str()), Some("hash"));
+        assert_eq!(
+            fetched.as_ref().and_then(|row| row.full_block_hex.as_deref()),
+            Some("0300")
+        );
     }
 }

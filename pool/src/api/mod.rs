@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -70,6 +71,7 @@ impl ApiServer {
             .route("/hashrate", get(hashrate))
             .route("/blocks", get(blocks))
             .route("/block-candidates", get(block_candidates))
+            .route("/block-candidates/:id", get(block_candidate_detail))
             .route("/public-blocks", get(public_blocks))
             .route("/pool", get(pool))
             .route("/network", get(network))
@@ -269,6 +271,39 @@ async fn block_candidates(State(state): State<ApiState>) -> impl IntoResponse {
         .collect::<Vec<_>>();
 
     Json(candidates)
+}
+
+async fn block_candidate_detail(
+    Path(id): Path<String>,
+    State(state): State<ApiState>,
+) -> impl IntoResponse {
+    let candidate_id = match uuid::Uuid::parse_str(&id) {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid id" })),
+            )
+                .into_response()
+        }
+    };
+
+    match state.sqlite.fetch_block_candidate(candidate_id).await {
+        Ok(Some(row)) => Json(row).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "not found" })),
+        )
+            .into_response(),
+        Err(err) => {
+            tracing::warn!("block candidate detail lookup failed: {err:?}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "lookup failed" })),
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn public_blocks() -> impl IntoResponse {
@@ -718,6 +753,8 @@ struct RpcStatus {
 #[derive(Serialize)]
 struct ZmqStatus {
     enabled: bool,
+    blockConnected: bool,
+    txConnected: bool,
     host: String,
 }
 
@@ -750,6 +787,8 @@ async fn blackhole_connection_status(State(state): State<ApiState>) -> impl Into
         },
         zmq: ZmqStatus {
             enabled: state.template_engine.zmq_connected(),
+            blockConnected: state.template_engine.zmq_block_connected(),
+            txConnected: state.template_engine.zmq_tx_connected(),
             host: if state.config.zmq_block_urls.is_empty() {
                 "Not configured".to_string()
             } else {
@@ -971,6 +1010,33 @@ mod tests {
         assert_eq!(value["lastShareStatus"], Value::from("accepted"));
         assert_eq!(value["lastShareDifficulty"], Value::from(9.0));
         assert_eq!(value["lastShareAt"], Value::from("2026-04-22T00:00:00Z"));
+    }
+
+    #[test]
+    fn connection_status_serializes_separate_zmq_flags() {
+        let status = ConnectionStatus {
+            bitcoinRpc: RpcStatus {
+                connected: true,
+                latency: Some(17),
+                url: "http://127.0.0.1:8332".to_string(),
+                port: Some(8332),
+            },
+            zmq: ZmqStatus {
+                enabled: true,
+                blockConnected: true,
+                txConnected: false,
+                host: "tcp://127.0.0.1:28334,tcp://127.0.0.1:28335".to_string(),
+            },
+            stratum: StratumStatus {
+                port: 3333,
+                connected: true,
+            },
+        };
+
+        let value = serde_json::to_value(status).expect("status serializes");
+        assert_eq!(value["zmq"]["enabled"], Value::from(true));
+        assert_eq!(value["zmq"]["blockConnected"], Value::from(true));
+        assert_eq!(value["zmq"]["txConnected"], Value::from(false));
     }
 
     #[test]

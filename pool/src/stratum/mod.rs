@@ -1086,7 +1086,7 @@ let job = session_job.job.clone();
 
         // High-priority submitblock path: fire before duplicate/reject bookkeeping
         // so a candidate never waits behind SQLite or dashboard code.
-        if result.accepted && result.is_block {
+        if result.is_block {
             if is_stale_block {
                 tracing::warn!(
                     "GRACE-BLOCK: worker={worker} found hash below target on stale-block job \
@@ -1145,7 +1145,6 @@ let job = session_job.job.clone();
                 );
                 tokio::spawn(async move {
                     let candidate_id = candidate_record.id;
-                    let _ = sqlite_for_block.insert_block_candidate(candidate_record).await;
                     let submit_started = std::time::Instant::now();
                     let (status, rpc_error) = match engine.submit_block(
                         &block_hex_owned, &block_hash, &template_key,
@@ -1162,6 +1161,7 @@ let job = session_job.job.clone();
                             ("submit_failed", Some(err.to_string()))
                         }
                     };
+                    let _ = sqlite_for_block.insert_block_candidate(candidate_record).await;
                     let _ = sqlite_for_block
                         .update_block_candidate_result(
                             candidate_id,

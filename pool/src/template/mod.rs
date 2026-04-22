@@ -176,7 +176,8 @@ pub struct TemplateEngine {
     template_refresh_failures: Arc<AtomicU64>,
     rpc_healthy: Arc<AtomicBool>,
     last_template_refresh_ms: Arc<AtomicI64>,
-    zmq_connected: Arc<AtomicBool>,
+    zmq_block_connected: Arc<AtomicBool>,
+    zmq_tx_connected: Arc<AtomicBool>,
 }
 
 impl TemplateEngine {
@@ -205,7 +206,8 @@ impl TemplateEngine {
             template_refresh_failures: Arc::new(AtomicU64::new(0)),
             rpc_healthy: Arc::new(AtomicBool::new(false)),
             last_template_refresh_ms: Arc::new(AtomicI64::new(0)),
-            zmq_connected: Arc::new(AtomicBool::new(false)),
+            zmq_block_connected: Arc::new(AtomicBool::new(false)),
+            zmq_tx_connected: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -254,7 +256,16 @@ impl TemplateEngine {
     }
 
     pub fn zmq_connected(&self) -> bool {
-        self.zmq_connected.load(Ordering::Relaxed)
+        self.zmq_block_connected.load(Ordering::Relaxed)
+            || self.zmq_tx_connected.load(Ordering::Relaxed)
+    }
+
+    pub fn zmq_block_connected(&self) -> bool {
+        self.zmq_block_connected.load(Ordering::Relaxed)
+    }
+
+    pub fn zmq_tx_connected(&self) -> bool {
+        self.zmq_tx_connected.load(Ordering::Relaxed)
     }
 
     fn note_template_refresh_success(&self) {
@@ -596,10 +607,10 @@ impl TemplateEngine {
                 Ok(Ok(gbt)) => {
                     // apply_gbt_response: dedup → build → broadcast. ONE call, no re-fetch.
                     if let Err(err) = self.apply_gbt_response(gbt).await {
-                        engine.note_template_refresh_failure();
+                        self.note_template_refresh_failure();
                         warn!("longpoll apply_gbt_response failed: {err:?}");
                     } else {
-                        engine.note_template_refresh_success();
+                        self.note_template_refresh_success();
                     }
                     // Loop immediately — no sleep. Core will block the next call.
                 }
@@ -648,7 +659,7 @@ impl TemplateEngine {
                     match socket.connect(url) {
                         Ok(_) => {
                             info!("ZMQ block connected: {url}");
-                            engine.zmq_connected.store(true, Ordering::Relaxed);
+                            engine.zmq_block_connected.store(true, Ordering::Relaxed);
                             connected = true;
                             // Don't break — connect to all URLs for multi-topic coverage.
                         }
@@ -656,6 +667,7 @@ impl TemplateEngine {
                     }
                 }
                 if !connected {
+                    engine.zmq_block_connected.store(false, Ordering::Relaxed);
                     std::thread::sleep(Duration::from_secs(2));
                     continue;
                 }
@@ -666,11 +678,13 @@ impl TemplateEngine {
                 // port(s) are reachable.
                 if let Err(err) = socket.set_subscribe(b"hashblock") {
                     warn!("ZMQ block subscribe failed (hashblock): {err:?}");
+                    engine.zmq_block_connected.store(false, Ordering::Relaxed);
                     std::thread::sleep(Duration::from_secs(2));
                     continue;
                 }
                 if let Err(err) = socket.set_subscribe(b"rawblock") {
                     warn!("ZMQ block subscribe failed (rawblock): {err:?}");
+                    engine.zmq_block_connected.store(false, Ordering::Relaxed);
                     std::thread::sleep(Duration::from_secs(2));
                     continue;
                 }
@@ -689,6 +703,7 @@ impl TemplateEngine {
                         Ok(m) => m,
                         Err(e) => {
                             warn!("ZMQ block recv failed (topic frame): {e:?}; reconnecting");
+                            engine.zmq_block_connected.store(false, Ordering::Relaxed);
                             break;
                         }
                     };
@@ -720,6 +735,7 @@ impl TemplateEngine {
                         } else {
                             warn!("ZMQ block recv failed (body frame); reconnecting");
                         }
+                        engine.zmq_block_connected.store(false, Ordering::Relaxed);
                         break;
                     }
 
@@ -749,6 +765,7 @@ impl TemplateEngine {
 
                 // Brief pause before reconnecting to avoid hammering Bitcoin Core.
                 warn!("ZMQ block socket lost — reconnecting in 1s (longpoll fallback is active)");
+                engine.zmq_block_connected.store(false, Ordering::Relaxed);
                 std::thread::sleep(Duration::from_secs(1));
             }
         })
@@ -782,7 +799,7 @@ impl TemplateEngine {
                     match socket.connect(url) {
                         Ok(_) => {
                             info!("ZMQ tx connected: {url}");
-                            engine.zmq_connected.store(true, Ordering::Relaxed);
+                            engine.zmq_tx_connected.store(true, Ordering::Relaxed);
                             connected = true;
                             // Connect to ALL provided endpoints for full coverage.
                         }
@@ -790,17 +807,20 @@ impl TemplateEngine {
                     }
                 }
                 if !connected {
+                    engine.zmq_tx_connected.store(false, Ordering::Relaxed);
                     std::thread::sleep(Duration::from_secs(2));
                     continue;
                 }
                 // Bitcoin Core topics: rawtx / hashtx. We'll subscribe to hashtx (small payload).
                 if let Err(err) = socket.set_subscribe(b"hashtx") {
                     warn!("ZMQ tx subscribe failed (hashtx): {err:?}");
+                    engine.zmq_tx_connected.store(false, Ordering::Relaxed);
                     std::thread::sleep(Duration::from_secs(2));
                     continue;
                 }
                 if let Err(err) = socket.set_subscribe(b"rawtx") {
                     warn!("ZMQ tx subscribe failed (rawtx): {err:?}");
+                    engine.zmq_tx_connected.store(false, Ordering::Relaxed);
                     std::thread::sleep(Duration::from_secs(2));
                     continue;
                 }
@@ -813,11 +833,13 @@ impl TemplateEngine {
                     // Drain the sequence frame to keep the stream aligned.
                     if socket.recv_msg(0).is_err() || socket.recv_msg(0).is_err() {
                         warn!("ZMQ tx recv failed; reconnecting");
+                        engine.zmq_tx_connected.store(false, Ordering::Relaxed);
                         break;
                     }
                     while socket.get_rcvmore().unwrap_or(false) {
                         if socket.recv_msg(0).is_err() {
                             warn!("ZMQ tx recv failed while draining multipart; reconnecting");
+                            engine.zmq_tx_connected.store(false, Ordering::Relaxed);
                             break;
                         }
                     }
@@ -841,6 +863,7 @@ impl TemplateEngine {
                     }
                 }
 
+                engine.zmq_tx_connected.store(false, Ordering::Relaxed);
                 std::thread::sleep(Duration::from_secs(1));
             }
         })

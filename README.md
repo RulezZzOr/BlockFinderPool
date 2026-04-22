@@ -256,7 +256,7 @@ running through the Docker bridge setup:
 
 Example:
 ```bash
-curl http://localhost:8081/pool | python3 -m json.tool
+curl http://localhost:8080/pool | python3 -m json.tool
 ```
 
 ---
