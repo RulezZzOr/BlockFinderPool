@@ -41,4 +41,4 @@ npm run build
 
 - Keep naming explicit.
 - Prefer the existing architecture and metrics model unless you are fixing a concrete issue.
-- Do not reintroduce the old non-commercial license text.
+- Respect the repository license and provenance notes in `LICENSE` and `NOTICE.md`.

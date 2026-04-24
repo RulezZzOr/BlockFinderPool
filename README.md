@@ -3,6 +3,8 @@
 A self-hosted Bitcoin solo hunter node for small LAN fleets.
 Zero fee — 100% of every block reward goes directly to the miner's own address.
 
+License: non-commercial use only. See `LICENSE` and `NOTICE.md` for provenance.
+
 ---
 
 ## Architecture
