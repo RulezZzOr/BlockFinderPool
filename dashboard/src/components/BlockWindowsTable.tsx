@@ -9,7 +9,9 @@ type Props = {
 };
 
 function blockLabel(window: BlockWindowRow): string {
-  return window.inProgress ? "Mining..." : `Block #${window.height.toLocaleString()}`;
+  return window.inProgress
+    ? `Mining... #${window.height.toLocaleString()}`
+    : `Block #${window.height.toLocaleString()}`;
 }
 
 function blockMeta(window: BlockWindowRow): string {
@@ -23,6 +25,18 @@ function blockMeta(window: BlockWindowRow): string {
     return timeAgo(window.endedAt);
   }
   return "—";
+}
+
+function maskWorkerLabel(worker: string | null): string {
+  if (!worker) return "—";
+  const dot = worker.indexOf(".");
+  if (dot < 0) {
+    return worker.length <= 3 ? `${worker}*` : `${worker.slice(0, 3)}*`;
+  }
+
+  const prefix = worker.slice(0, Math.min(3, dot));
+  const suffix = worker.slice(dot + 1);
+  return `${prefix}*.${suffix}`;
 }
 
 export default function BlockWindowsTable({ windows, publicBlocks, compact, onToggleCompact }: Props) {
@@ -75,7 +89,7 @@ export default function BlockWindowsTable({ windows, publicBlocks, compact, onTo
                   <div className="bh-block-window-stat">
                     <span>Best Worker</span>
                     <strong title={window.bestWorker ?? window.bestSubmittedWorker ?? "—"}>
-                      {window.bestWorker ?? window.bestSubmittedWorker ?? "—"}
+                      {maskWorkerLabel(window.bestWorker ?? window.bestSubmittedWorker ?? null)}
                     </strong>
                   </div>
                   <div className="bh-block-window-stat">
