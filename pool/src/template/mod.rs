@@ -940,13 +940,18 @@ impl TemplateEngine {
         // Build job first; only commit the key after a successful build so a
         // transient failure doesn't "poison" the key and stall future updates.
         let job = self.build_job(gbt, key.clone()).await?;
-        self.metrics.set_template_scope(&job).await;
+        let job_arc = Arc::new(job);
+
+        // Solo hunter hot path: wake Stratum notify tasks before metrics/logging.
+        // Metrics stay sequential for deterministic dashboard scope rotation.
+        *self.last_template_key.lock().await = Some(key);
+        self.sender.send_replace(job_arc.clone());
+
+        self.metrics.set_template_scope(&job_arc).await;
         info!(
             "new template: height={} txs={} coinbase_value={} sat nbits={}",
-            job.height, job.transactions.len(), job.coinbase_value, job.nbits
+            job_arc.height, job_arc.transactions.len(), job_arc.coinbase_value, job_arc.nbits
         );
-        *self.last_template_key.lock().await = Some(key);
-        self.sender.send_replace(Arc::new(job));
 
         drop(permit);
         Ok(())

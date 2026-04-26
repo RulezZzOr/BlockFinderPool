@@ -294,9 +294,9 @@ function CoreVisual({ pool }: { pool: PoolStats | null }) {
 function BitcoinCorePanel({ pool, network }: { pool: PoolStats | null; network: NetworkInfo | null }) {
   const hasBlocks = (pool?.zmqBlocksDetected ?? 0) > 0;
   const zmqRatio = hasBlocks
-    ? (pool!.zmqBlockNotifications / pool!.zmqBlocksDetected).toFixed(3)
+    ? (pool!.zmqBlockNotifications / pool!.zmqBlocksDetected).toFixed(2)
     : null;
-  const zmqRatioOk = zmqRatio !== null && parseFloat(zmqRatio) >= 1.8;
+  const zmqRatioOk = zmqRatio !== null && parseFloat(zmqRatio) >= 1.0;
   const txTotal = (pool?.zmqTxTriggered ?? 0) + (pool?.zmqTxDebounced ?? 0) + (pool?.zmqTxPostBlockSuppressed ?? 0);
   const suppressPct = txTotal > 0 ? ((txTotal - (pool?.zmqTxTriggered ?? 0)) / txTotal * 100).toFixed(0) : "—";
 
@@ -343,15 +343,20 @@ function BitcoinCorePanel({ pool, network }: { pool: PoolStats | null; network: 
       </div>
       <div className="bh-zmq-ratio" style={{ marginTop: 6 }}>
         <div className="bh-zmq-dot" style={{
-          background: zmqRatio === null ? "var(--text3)" : zmqRatioOk ? "var(--green)" : "var(--yellow)"
+          background: zmqRatio === null ? "var(--text3)" : zmqRatioOk ? "var(--green)" : "var(--red)"
         }} />
-        <span className="bh-zmq-label">Dual ZMQ ratio</span>
+        <span
+          className="bh-zmq-label"
+          title="Notifications per detected block. 1.0x is healthy for single-topic hashblock setups; 2.0x means hashblock+rawblock both fired."
+        >
+          ZMQ block multiplier
+        </span>
         <span className="bh-zmq-val" style={{
-          color: zmqRatio === null ? "var(--text3)" : zmqRatioOk ? "var(--green)" : "var(--yellow)"
+          color: zmqRatio === null ? "var(--text3)" : zmqRatioOk ? "var(--green)" : "var(--red)"
         }}>
           {zmqRatio === null
             ? "waiting for block…"
-            : `${zmqRatio} / 2.000 ${zmqRatioOk ? "✓" : "⚠"}`}
+            : `${zmqRatio}x ${zmqRatioOk ? "✓" : "⚠ missed"}`}
         </span>
       </div>
       <div className="bh-zmq-ratio" style={{ marginTop: 6 }}>
@@ -727,7 +732,7 @@ function BlockPanel({ pool, miners, network }: { pool: PoolStats | null; miners:
 
 function SystemHealth({ pool, miners }: { pool: PoolStats | null; miners: Miner[] }) {
   const staleRatioOk = (pool?.staleRatio ?? 0) < 0.005;
-  const zmqOk = pool ? (pool.zmqBlockNotifications === 0 || pool.zmqBlockNotifications / Math.max(1, pool.zmqBlocksDetected) >= 1.8) : false;
+  const zmqOk = pool ? (pool.zmqBlocksDetected === 0 || pool.zmqBlockNotifications / pool.zmqBlocksDetected >= 1.0) : false;
   const templateOk = pool ? !pool.templateStale : false;
   const zmqConnectedOk = pool?.zmqConnected ?? false;
   const templateAgeSecs = pool?.currentTemplateAgeSecs ?? null;
@@ -756,7 +761,7 @@ function SystemHealth({ pool, miners }: { pool: PoolStats | null; miners: Miner[
       {[
         { label: "Stale Rate", ok: staleRatioOk, detail: `${((pool?.staleRatio ?? 0) * 100).toFixed(4)}%` },
         { label: "New-Block Stales", ok: staleNewBlockOk, detail: String(pool?.stalesNewBlock ?? 0) },
-        { label: "ZMQ Dual Endpoints", ok: zmqOk, detail: pool && pool.zmqBlocksDetected > 0 ? `${(pool.zmqBlockNotifications / pool.zmqBlocksDetected).toFixed(2)}x` : "idle" },
+        { label: "ZMQ Block Coverage", ok: zmqOk, detail: pool && pool.zmqBlocksDetected > 0 ? `${(pool.zmqBlockNotifications / pool.zmqBlocksDetected).toFixed(2)}x` : "idle" },
         { label: "Template Freshness", ok: templateOk, detail: templateAgeSecs != null ? `${fmtMs(templateAgeSecs * 1000)} / ${pool!.templateMaxAgeSecs}s` : "idle" },
         { label: "ZMQ Connected", ok: zmqConnectedOk, detail: pool?.zmqConnected ? `block+tx` : "offline" },
         { label: "Version Rolling", ok: vrOk, detail: `${pool?.versionRollingViolations ?? 0} violations` },
