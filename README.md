@@ -373,11 +373,14 @@ PERSIST_SHARES=false
 PERSIST_BLOCKS=true
 PERSIST_BEST=true
 BEST_PERSIST_INTERVAL_SECS=10
-TARGET_SHARE_TIME_SECS=20
-VARDIFF_RETARGET_SECS=45
+TARGET_SHARE_TIME_SECS=15
+VARDIFF_RETARGET_SECS=30
 MIN_DIFFICULTY=8192
-MAX_DIFFICULTY=262144
+MAX_DIFFICULTY=16777216
 STRATUM_START_DIFFICULTY=32768
+RECONNECT_RECENT_SECS=15
+EXTRANONCE1_SIZE=4
+EXTRANONCE2_SIZE=8
 ```
 
 ### `ZMQ_DEBOUNCE_MS`
@@ -396,8 +399,10 @@ is largely independent of this value.  The main effect is Bitcoin Core CPU load.
 
 After a new block, ZMQ TX events are suppressed for this many ms to avoid
 hammering Bitcoin Core while it processes the new mempool burst.
-Wire-measured: mempool stabilises 10–12 s after a block.
-Default: 12000 ms. Increase to 15000–20000 if Core CPU spikes after blocks.
+Wire-measured: mempool often stabilises 10–12 s after a block, but solo
+hunting should not suppress TX refreshes too long after a new block.
+Default: 8000 ms. Use 5000 ms only on a strong local Bitcoin Core/NVMe host;
+increase to 12000-20000 if Core CPU spikes after blocks.
 
 ### Timing synchronisation rule
 

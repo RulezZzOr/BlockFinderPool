@@ -36,6 +36,12 @@ const MAX_LINE_BYTES: usize = 65_536;
 /// enough headroom for very low-difficulty / low-hashrate devices while
 /// ensuring dead TCP connections are reaped promptly.
 const IDLE_TIMEOUT_SECS: u64 = 300;
+
+/// Duplicate share LRU window per session.
+///
+/// The key includes job_id, nonce, ntime, extranonce2 and version. A larger
+/// window protects against reconnect/replay bursts without using a full clear().
+const MAX_DUP_HASHES: usize = 16_384;
 use uuid::Uuid;
 
 use std::str::FromStr;
@@ -840,10 +846,9 @@ impl StratumServer {
                         // ── Stale classification ─────────────────────────────
                         // Priority: Reconnect > NewBlock > Expired
                         //
-                        // Reconnect: session < 30 s old → miner reconnected and
-                        //   submitted a share from its previous session's job.
-                        //   These stales are expected on reconnect storms and should
-                        //   not be confused with ZMQ latency stales.
+                        // Reconnect: session is very young → miner likely replayed
+                        //   work from a previous session. Threshold is configurable
+                        //   via RECONNECT_RECENT_SECS.
                         //
                         // NewBlock: clean_jobs=true was sent ≤ 60 s ago → miner
                         //   was still working on the old block when a new one arrived.
@@ -853,7 +858,7 @@ impl StratumServer {
                         //   job ID (e.g. miner resumed from a paused state).
                         let session_age_secs = (now - guard.session_start).num_seconds();
                         let notify_delay_ms  = (now - guard.last_notify).num_milliseconds();
-                        let reason = if session_age_secs < 30 {
+                        let reason = if session_age_secs < self.config.reconnect_recent_secs {
                             StaleReason::Reconnect
                         } else {
                             match guard.last_clean_jobs_time {
@@ -1005,7 +1010,6 @@ impl StratumServer {
         // This guarantees the most-recent MAX_DUP_HASHES-1 keys always remain in the
         // guard window — eliminating the clear()-then-duplicate-slips-through race
         // that a full wipe would create.
-        const MAX_DUP_HASHES: usize = 4096;
         let version_key = version.as_deref().unwrap_or(&job.version);
         // Build the duplicate-detection key.
         // extranonce2 is stored as a String (the canonical validated hex), NOT as u64,
@@ -1057,14 +1061,15 @@ impl StratumServer {
         let now = Utc::now();
         // notify_to_submit_ms: time from last mining.notify → this mining.submit.
         // Dominated by hashing time at the current difficulty, NOT network RTT.
-        // At TARGET_SHARE_TIME_SECS=10 this will naturally be ~10,000 ms.
+        // At TARGET_SHARE_TIME_SECS=15 this will naturally be ~15,000 ms.
         let notify_to_submit_ms = (now - last_notify).num_milliseconds().max(0);
         let notify_delay_ms = notify_to_submit_ms as u64;
         // job_age_secs: age of the GBT template at share submission time.
         // > 30 s suggests ZMQ latency or miner replaying old work.
         let job_age_secs = (now - session_job.job.created_at).num_seconds().max(0) as u64;
-        // reconnect_recent: session started < 30 s ago.
-        let reconnect_recent = (now - session_start).num_seconds() < 30;
+        // reconnect_recent is diagnostic only; it never affects acceptance.
+        let reconnect_recent =
+            (now - session_start).num_seconds() < self.config.reconnect_recent_secs;
         // submit_rtt_ms: actual pool processing time (parse→validate→respond).
         // Fractional ms via µs for sub-millisecond accuracy.
         // Healthy value: 0.1–5 ms. Spike > 50 ms indicates CPU pressure.
@@ -1451,7 +1456,7 @@ struct StratumRequest {
 struct NotifyBucket {
     tokens:      f64,
     capacity:    f64,
-    /// tokens added per millisecond (= 1 / 500)
+    /// tokens added per millisecond (= 1 / NOTIFY_BUCKET_REFILL_MS)
     fill_per_ms: f64,
     last_fill_ms: u64,
 }
@@ -1460,7 +1465,7 @@ impl NotifyBucket {
     /// Construct from pool config values.
     ///
     /// `capacity`    = NOTIFY_BUCKET_CAPACITY  (default 2 tokens)
-    /// `refill_ms`   = NOTIFY_BUCKET_REFILL_MS (default 500 ms per token)
+    /// `refill_ms`   = NOTIFY_BUCKET_REFILL_MS (default 1500 ms per token)
     fn new(capacity: f64, refill_ms: f64) -> Self {
         let fill_per_ms = if refill_ms > 0.0 { 1.0 / refill_ms } else { 1.0 };
         Self {
@@ -1520,13 +1525,13 @@ struct SessionState {
     last_notify: chrono::DateTime<chrono::Utc>,
     last_prevhash: Option<String>,
     /// Wall-clock time when this session was created (TCP connection accepted).
-    /// Used to detect reconnect stales: if a share arrives within 30 s of
+    /// Used to detect reconnect stales: if a share arrives shortly after
     /// session start, the miner likely reconnected and replayed an old share.
     session_start: chrono::DateTime<chrono::Utc>,
     /// Timestamp of last clean_jobs=true notify. Used to classify stales as
     /// "new_block" (if within 60s) vs "expired" (job just timed out naturally).
     last_clean_jobs_time: Option<chrono::DateTime<chrono::Utc>>,
-    /// Token bucket: rate-limits mining.notify to ≤ 1/500ms burst=2.
+    /// Token bucket: rate-limits mining.notify according to NOTIFY_BUCKET_REFILL_MS.
     /// Bypassed when clean_jobs=true so new-block notifies are never throttled.
     notify_bucket: NotifyBucket,
     /// Epoch-ms deadline until which stale-block jobs are kept in the queue

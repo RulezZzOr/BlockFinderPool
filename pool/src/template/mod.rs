@@ -161,7 +161,7 @@ pub struct TemplateEngine {
     /// Debounce for TX ZMQ notifications (hashtx/rawtx).
     last_zmq_trigger_ms: Arc<AtomicU64>,
     /// Post-block TX suppression: after a hashblock ZMQ fires, suppress hashtx-driven
-    /// GBT refreshes for POST_BLOCK_SUPPRESS_MS (15s default) so the mempool burst
+    /// GBT refreshes for POST_BLOCK_SUPPRESS_MS (8s default) so the mempool burst
     /// doesn't hammer bitcoind.  After the window expires, ONE refresh captures all
     /// accumulated high-fee txns.  Stored as absolute epoch-ms (0 = not suppressing).
     post_block_suppress_until_ms: Arc<AtomicU64>,
@@ -290,7 +290,7 @@ impl TemplateEngine {
     }
 
     /// Block debounce: 100 ms to coalesce hashblock + rawblock arriving simultaneously.
-    /// Also arms the post-block TX suppression window (POST_BLOCK_SUPPRESS_MS = 15 s).
+    /// Also arms the post-block TX suppression window (POST_BLOCK_SUPPRESS_MS default 8 s).
     ///
     /// Separation from TX debounce is intentional: a flood of hashtx notifications
     /// CANNOT delay or suppress a new-block template refresh.
@@ -1202,9 +1202,13 @@ impl TemplateEngine {
         let extranonce2 = vec![0u8; self.config.extranonce2_size];
 
         let mut tag = self.config.pool_tag.clone().into_bytes();
-        if !self.config.coinbase_message.is_empty() {
-            tag.extend_from_slice(b"/");
-            tag.extend_from_slice(self.config.coinbase_message.as_bytes());
+        let pool_tag_normalized = self.config.pool_tag.trim().trim_matches('/');
+        let coinbase_message = self.config.coinbase_message.trim().trim_matches('/');
+        if !coinbase_message.is_empty() && coinbase_message != pool_tag_normalized {
+            if !tag.is_empty() && !tag.ends_with(b"/") {
+                tag.extend_from_slice(b"/");
+            }
+            tag.extend_from_slice(coinbase_message.as_bytes());
         }
         if !tag.is_empty() {
             script_sig.push(tag.len() as u8);

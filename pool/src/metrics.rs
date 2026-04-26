@@ -52,7 +52,7 @@ pub struct MinerStats {
     pub last_seen: DateTime<Utc>,
     /// Time from last `mining.notify` to `mining.submit` arriving (ms, EMA).
     /// Dominated by hashing time at the current difficulty — NOT network RTT.
-    /// At TARGET_SHARE_TIME_SECS=10 this will naturally read ~10,000 ms.
+    /// At TARGET_SHARE_TIME_SECS=15 this will naturally read ~15,000 ms.
     /// Renamed from `latency_ms_avg` to prevent confusion with TCP ping.
     pub notify_to_submit_ms: f64,
     /// Actual server-side processing time per submit (ms, EMA).
@@ -80,7 +80,7 @@ pub struct ShareEvent {
     /// Milliseconds between the last `mining.notify` and this share arriving.
     /// This is an upper bound on miner round-trip latency.
     pub notify_delay_ms: u64,
-    /// True when the session was younger than 30 s at submit time.
+    /// True when the session was younger than the configured reconnect threshold.
     /// Indicates the miner recently reconnected (replay of pre-reconnect shares).
     pub reconnect_recent: bool,
 }
@@ -800,7 +800,7 @@ pub enum StaleReason {
     NewBlock,
     /// Job ID not found: job just expired / unknown (no clean_jobs signal seen).
     Expired,
-    /// Job submitted on a session younger than 30 s.
+    /// Job submitted on a session younger than the configured reconnect threshold.
     /// Miner likely reconnected and replayed a share from the previous session.
     Reconnect,
 }
@@ -819,7 +819,7 @@ pub struct PoolCounters {
     /// Suppressed because a different source already sent the SAME template_key
     /// (content-based dedup: ZMQ_TX + timer both fire for identical content).
     pub notify_deduped:         AtomicU64,
-    /// Suppressed by per-session token bucket (rate > 1 notify/500ms, clean_jobs=false).
+    /// Suppressed by per-session token bucket (clean_jobs=false).
     pub notify_rate_limited:    AtomicU64,
     /// Suppressed by post-block TX window (ZMQ hashtx fired within 15s of hashblock).
     /// Counter already exists as zmq_tx_suppressed — aliased here for API symmetry.
@@ -842,7 +842,7 @@ pub struct PoolCounters {
     pub stales_new_block:       AtomicU64,
     /// Stales where the job was simply expired / unknown.
     pub stales_expired:         AtomicU64,
-    /// Stales on fresh sessions (< 30 s): miner reconnected and sent an old share.
+    /// Stales on fresh sessions: miner reconnected and sent an old share.
     pub stales_reconnect:       AtomicU64,
     /// ZMQ TX notifications suppressed by ZMQ_DEBOUNCE_MS (normal inter-tx debounce).
     /// High values are expected and healthy — Bitcoin mempool sends hundreds of

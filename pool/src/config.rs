@@ -49,6 +49,9 @@ pub struct Config {
     pub target_share_time_secs: f64,
     pub vardiff_retarget_time_secs: f64,
     pub vardiff_enabled: bool,
+    /// Shares arriving this soon after TCP connect are marked as reconnect-related
+    /// for diagnostics. This does not affect share acceptance.
+    pub reconnect_recent_secs: i64,
     pub job_refresh_ms: u64,
     pub template_poll_ms: u64,
     pub template_max_age_secs: u64,
@@ -59,7 +62,7 @@ pub struct Config {
     /// Default 2: miner can receive 2 back-to-back mempool-update notifies at connect time.
     pub notify_bucket_capacity: f64,
     /// Milliseconds between token refills in the per-session notify bucket.
-    /// Default 500: at most 1 new mempool-update notify per 500ms per miner.
+    /// Default 1500: at most 1 new mempool-update notify per 1500ms per miner.
     /// clean_jobs=true (new block) always bypasses the bucket entirely.
     pub notify_bucket_refill_ms: f64,
     /// Minimum ms between ZMQ-triggered template refreshes (debounce duplicate topics).
@@ -152,14 +155,14 @@ impl Config {
         let payout_address = env::var("PAYOUT_ADDRESS").unwrap_or_default();
 
         let pool_tag = env::var("POOL_TAG").unwrap_or_else(|_| "BlockFinder".to_string());
-        let coinbase_message = env::var("COINBASE_MESSAGE").unwrap_or_else(|_| "BlockFinder".to_string());
+        let coinbase_message = env::var("COINBASE_MESSAGE").unwrap_or_default();
 
         let extranonce1_size = env::var("EXTRANONCE1_SIZE")
             .unwrap_or_else(|_| "4".to_string())
             .parse()
             .context("EXTRANONCE1_SIZE must be a number")?;
         let extranonce2_size = env::var("EXTRANONCE2_SIZE")
-            .unwrap_or_else(|_| "4".to_string())
+            .unwrap_or_else(|_| "8".to_string())
             .parse()
             .context("EXTRANONCE2_SIZE must be a number")?;
 
@@ -168,7 +171,7 @@ impl Config {
             .parse()
             .context("MIN_DIFFICULTY must be a number")?;
         let max_difficulty: f64 = env::var("MAX_DIFFICULTY")
-            .unwrap_or_else(|_| "262144".to_string())
+            .unwrap_or_else(|_| "16777216".to_string())
             .parse()
             .context("MAX_DIFFICULTY must be a number")?;
         let start_difficulty: f64 = env::var("STRATUM_START_DIFFICULTY")
@@ -177,14 +180,18 @@ impl Config {
             .unwrap_or(min_difficulty)
             .clamp(min_difficulty, max_difficulty);
         let target_share_time_secs = env::var("TARGET_SHARE_TIME_SECS")
-            .unwrap_or_else(|_| "20".to_string())
+            .unwrap_or_else(|_| "15".to_string())
             .parse()
             .context("TARGET_SHARE_TIME_SECS must be a number")?;
         let vardiff_retarget_time_secs = env::var("VARDIFF_RETARGET_SECS")
-            .unwrap_or_else(|_| "45".to_string())
+            .unwrap_or_else(|_| "30".to_string())
             .parse()
             .context("VARDIFF_RETARGET_SECS must be a number")?;
                 let vardiff_enabled = parse_bool("VARDIFF_ENABLED", true);
+        let reconnect_recent_secs = env::var("RECONNECT_RECENT_SECS")
+            .unwrap_or_else(|_| "15".to_string())
+            .parse()
+            .context("RECONNECT_RECENT_SECS must be a number")?;
 
         let job_refresh_ms = env::var("JOB_REFRESH_MS")
             .unwrap_or_else(|_| "30000".to_string())
@@ -195,7 +202,7 @@ impl Config {
             .parse()
             .context("TEMPLATE_POLL_MS must be a number")?;
         let template_max_age_secs = env::var("TEMPLATE_MAX_AGE_SECS")
-            .unwrap_or_else(|_| "30".to_string())
+            .unwrap_or_else(|_| "20".to_string())
             .parse()
             .context("TEMPLATE_MAX_AGE_SECS must be a number")?;
         let notify_bucket_capacity: f64 = env::var("NOTIFY_BUCKET_CAPACITY")
@@ -203,15 +210,15 @@ impl Config {
             .parse()
             .context("NOTIFY_BUCKET_CAPACITY must be a number")?;
         let notify_bucket_refill_ms: f64 = env::var("NOTIFY_BUCKET_REFILL_MS")
-            .unwrap_or_else(|_| "500".to_string())
+            .unwrap_or_else(|_| "1500".to_string())
             .parse()
             .context("NOTIFY_BUCKET_REFILL_MS must be a number")?;
         let zmq_debounce_ms = env::var("ZMQ_DEBOUNCE_MS")
-            .unwrap_or_else(|_| "250".to_string())
+            .unwrap_or_else(|_| "1500".to_string())
             .parse()
             .context("ZMQ_DEBOUNCE_MS must be a number")?;
         let post_block_suppress_ms = env::var("POST_BLOCK_SUPPRESS_MS")
-            .unwrap_or_else(|_| "15000".to_string())
+            .unwrap_or_else(|_| "8000".to_string())
             .parse()
             .context("POST_BLOCK_SUPPRESS_MS must be a number")?;
 
@@ -270,6 +277,7 @@ impl Config {
             target_share_time_secs,
             vardiff_retarget_time_secs,
             vardiff_enabled,
+            reconnect_recent_secs,
             job_refresh_ms,
             template_poll_ms,
             template_max_age_secs,

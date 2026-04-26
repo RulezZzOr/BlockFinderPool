@@ -589,27 +589,32 @@ BEST_PERSIST_INTERVAL_SECS=10
 
 # ── Vardiff ────────────────────────────────────────────────────────────────────
 VARDIFF_ENABLED=true
-TARGET_SHARE_TIME_SECS=20
-VARDIFF_RETARGET_SECS=45
+TARGET_SHARE_TIME_SECS=15
+VARDIFF_RETARGET_SECS=30
 MIN_DIFFICULTY=8192
-MAX_DIFFICULTY=262144
+MAX_DIFFICULTY=16777216
 STRATUM_START_DIFFICULTY=32768
+RECONNECT_RECENT_SECS=15
+
+# ── Extranonce ────────────────────────────────────────────────────────────────
+EXTRANONCE1_SIZE=4
+EXTRANONCE2_SIZE=8
 
 # ── Job timing (optimised — see .env.example for tuning guide) ───────────────
 # Wire-measured optimal values for Umbrel Home / low-power hardware:
 #   ZMQ_DEBOUNCE_MS=1500 → ~44 GBT calls/min, 9s avg job interval per miner
-#   POST_BLOCK_SUPPRESS_MS=12000 → absorbs post-block mempool burst
+#   POST_BLOCK_SUPPRESS_MS=8000 → absorbs most post-block mempool burst while staying aggressive
 ZMQ_DEBOUNCE_MS=1500
-POST_BLOCK_SUPPRESS_MS=12000
+POST_BLOCK_SUPPRESS_MS=8000
 NOTIFY_BUCKET_CAPACITY=2
-NOTIFY_BUCKET_REFILL_MS=600
+NOTIFY_BUCKET_REFILL_MS=1500
 JOB_REFRESH_MS=30000
 TEMPLATE_POLL_MS=30000
-TEMPLATE_MAX_AGE_SECS=30
+TEMPLATE_MAX_AGE_SECS=20
 
 # ── Coinbase tag (visible on-chain if you find a block) ──────────────────────
 POOL_TAG=/BlockFinder Solo Pool
-COINBASE_MESSAGE=BlockFinder
+COINBASE_MESSAGE=
 
 # ── Authentication ────────────────────────────────────────────────────────────
 # Set AUTH_TOKEN to require miners to use a password.

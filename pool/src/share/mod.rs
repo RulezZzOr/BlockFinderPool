@@ -2,6 +2,7 @@ use anyhow::{anyhow, Context};
 use num_bigint::BigUint;
 use num_traits::Num;
 
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::hash::{double_sha256, merkle_step};
@@ -12,6 +13,14 @@ use crate::template::JobTemplate;
 // Used ONLY for metrics/UI display (true_share_diff). NEVER for acceptance/block.
 const DIFF1_TARGET_HEX: &str =
     "00000000ffff0000000000000000000000000000000000000000000000000000";
+static DIFF1_TARGET: OnceLock<BigUint> = OnceLock::new();
+
+fn diff1_target() -> &'static BigUint {
+    DIFF1_TARGET.get_or_init(|| {
+        BigUint::from_str_radix(DIFF1_TARGET_HEX, 16)
+            .expect("DIFF1_TARGET_HEX is a valid 256-bit hex constant")
+    })
+}
 
 /// Compute the 256-bit share target from a difficulty value.
 /// target = diff1 / difficulty  (BigUint arithmetic, exact).
@@ -29,7 +38,7 @@ pub fn share_target_le(diff: f64) -> anyhow::Result<[u8; 32]> {
     const SCALE: u128 = 1_000_000_000_000; // 1e12
     let diff_scaled = ((diff * SCALE as f64).round() as u128).max(1);
 
-    let mut diff1 = BigUint::from_str_radix(DIFF1_TARGET_HEX, 16)?;
+    let mut diff1 = diff1_target().clone();
     diff1 *= BigUint::from(SCALE);
     let target = diff1 / BigUint::from(diff_scaled);
 
@@ -200,16 +209,13 @@ pub fn leq_le256(a: &[u8; 32], b: &[u8; 32]) -> bool {
 /// f64 with integer-part computed via BigUint for precision.
 /// Result is only used for best-share display — NOT for accept/reject decisions.
 fn hash_to_display_diff(hash_le: &[u8; 32]) -> f64 {
-    let diff1 = match BigUint::from_str_radix(DIFF1_TARGET_HEX, 16) {
-        Ok(v) => v,
-        Err(_) => return 0.0,
-    };
+    let diff1 = diff1_target();
     let mut be = *hash_le;
     be.reverse();
     let hash_val = BigUint::from_bytes_be(&be);
     if hash_val == BigUint::ZERO { return f64::INFINITY; }
-    let q = &diff1 / &hash_val;
-    let r = &diff1 % &hash_val;
+    let q = diff1 / &hash_val;
+    let r = diff1 % &hash_val;
     use num_traits::ToPrimitive;
     let q_f64 = q.to_f64().unwrap_or(f64::MAX);
     let frac  = match (r.to_f64(), hash_val.to_f64()) {
