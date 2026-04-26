@@ -96,7 +96,8 @@ function deriveMiningHealth(
     if (Number.isNaN(ts) || ts < windowStart) return sum;
     return sum + (point.shares ?? 0);
   }, 0);
-  const observedSharesPerMin = observedSharesLast10Min / 10;
+  const observedWindowMins = runtimeSecs > 0 ? Math.min(10, Math.max(1, runtimeSecs / 60)) : 10;
+  const observedSharesPerMin = observedSharesLast10Min / observedWindowMins;
   const observedVsExpected = expectedSharesPerMin > 0 ? observedSharesPerMin / expectedSharesPerMin : 0;
 
   const staleRatio = safePercent(totalStale, totalSubmissions);
@@ -161,7 +162,7 @@ function deriveMiningHealth(
       severity: "warning",
     });
   }
-  if (rejectRatio > 0.02) {
+  if (runtimeSecs >= 300 && totalSubmissions >= 100 && rejectRatio > 0.02) {
     reasons.push({
       label: "Reject ratio",
       detail: `${(rejectRatio * 100).toFixed(2)}%`,
@@ -863,7 +864,7 @@ function MiningHealthPanel({
           <div className="bh-health-kpi-value">{health.expectedSharesPerMin > 0 ? `${(health.observedVsExpected * 100).toFixed(1)}%` : "—"}</div>
         </div>
         <div className="bh-health-kpi">
-          <div className="bh-health-kpi-label">Current best chance</div>
+          <div className="bh-health-kpi-label">Best-share rarity</div>
           <div className="bh-health-kpi-value">{bestProbPct != null ? `${bestProbPct.toFixed(3)}%` : "—"}</div>
         </div>
       </div>

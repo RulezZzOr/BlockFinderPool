@@ -891,6 +891,9 @@ impl PoolCounters {
     pub fn zmq_blocks_detected(&self)         -> u64 { self.zmq_blocks_detected.load(Ordering::Relaxed) }
     pub fn last_clean_jobs_notify_at(&self) -> Option<DateTime<Utc>> {
         let secs = self.last_clean_jobs_notify_at_secs.load(Ordering::Relaxed);
+        if secs <= 0 {
+            return None;
+        }
         DateTime::<Utc>::from_timestamp(secs, 0)
     }
 

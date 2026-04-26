@@ -438,23 +438,84 @@ async fn refresh_persisted_block_windows_cache(
 }
 
 fn merge_block_windows(
-    current: SqlBlockWindowRow,
+    mut current: SqlBlockWindowRow,
     finalized_pending: Vec<SqlBlockWindowRow>,
     persisted: Vec<SqlBlockWindowRow>,
     limit: usize,
 ) -> Vec<SqlBlockWindowRow> {
+    for row in persisted.iter().chain(finalized_pending.iter()) {
+        if row.in_progress && same_block_window_scope(&current, row) {
+            merge_current_block_window(&mut current, row);
+        }
+    }
+
     let mut rows = Vec::<SqlBlockWindowRow>::new();
     let mut seen = HashSet::<String>::new();
+    let mut seen_scopes = HashSet::<(i64, String)>::new();
     for row in std::iter::once(current)
         .chain(finalized_pending.into_iter().rev())
         .chain(persisted)
     {
-        if seen.insert(row.id.clone()) {
+        if row.in_progress && !rows.is_empty() {
+            continue;
+        }
+
+        let scope = block_window_scope(&row);
+        if seen.insert(row.id.clone()) && seen_scopes.insert(scope) {
             rows.push(row);
         }
     }
     rows.truncate(limit);
     rows
+}
+
+fn block_window_scope(row: &SqlBlockWindowRow) -> (i64, String) {
+    (row.height, row.prevhash.clone())
+}
+
+fn same_block_window_scope(left: &SqlBlockWindowRow, right: &SqlBlockWindowRow) -> bool {
+    left.height == right.height && left.prevhash == right.prevhash
+}
+
+fn merge_current_block_window(current: &mut SqlBlockWindowRow, stale_current: &SqlBlockWindowRow) {
+    if stale_current.id != current.id {
+        current.started_at =
+            std::cmp::min(current.started_at.clone(), stale_current.started_at.clone());
+        current.created_at =
+            std::cmp::min(current.created_at.clone(), stale_current.created_at.clone());
+        current.share_count = current.share_count.saturating_add(stale_current.share_count);
+        current.accepted_count = current.accepted_count.saturating_add(stale_current.accepted_count);
+        current.stale_count = current.stale_count.saturating_add(stale_current.stale_count);
+        current.duplicate_count = current.duplicate_count.saturating_add(stale_current.duplicate_count);
+    }
+
+    if stale_current.best_submitted_difficulty > current.best_submitted_difficulty {
+        current.best_submitted_difficulty = stale_current.best_submitted_difficulty;
+        current.best_submitted_worker = stale_current.best_submitted_worker.clone();
+        current.best_submitted_payout_address = stale_current.best_submitted_payout_address.clone();
+        current.best_worker = stale_current.best_worker.clone();
+        current.best_payout_address = stale_current.best_payout_address.clone();
+    }
+
+    if stale_current.best_accepted_difficulty > current.best_accepted_difficulty {
+        current.best_accepted_difficulty = stale_current.best_accepted_difficulty;
+        current.best_accepted_worker = stale_current.best_accepted_worker.clone();
+    }
+
+    if stale_current.best_block_candidate_difficulty > current.best_block_candidate_difficulty {
+        current.best_block_candidate_difficulty = stale_current.best_block_candidate_difficulty;
+        current.best_candidate_worker = stale_current.best_candidate_worker.clone();
+    }
+
+    if current.external_pool.is_none() {
+        current.external_pool = stale_current.external_pool.clone();
+    }
+    if current.fee_rate_sat_vb.is_none() {
+        current.fee_rate_sat_vb = stale_current.fee_rate_sat_vb;
+    }
+    if current.avg_pool_hashrate.is_none() {
+        current.avg_pool_hashrate = stale_current.avg_pool_hashrate;
+    }
 }
 
 async fn block_candidates(State(state): State<ApiState>) -> impl IntoResponse {
@@ -1542,6 +1603,43 @@ mod tests {
         let rows = merge_block_windows(current, vec![], persisted, 3);
         let ids = rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>();
         assert_eq!(ids, vec!["current", "hist-2", "hist-1"]);
+    }
+
+    #[test]
+    fn merge_block_windows_merges_restarted_current_scope_and_drops_stale_live_rows() {
+        let mut current = test_block_window("current-runtime", 300, true);
+        current.prevhash = "same-prevhash".to_string();
+        current.best_submitted_difficulty = 7.0;
+        current.best_worker = Some("worker-new".to_string());
+        current.best_submitted_worker = Some("worker-new".to_string());
+        current.share_count = 2;
+        current.started_at = "2026-04-22T00:05:00Z".to_string();
+
+        let mut stale_same_block = test_block_window("old-runtime-same-block", 300, true);
+        stale_same_block.prevhash = "same-prevhash".to_string();
+        stale_same_block.best_submitted_difficulty = 34.0;
+        stale_same_block.best_worker = Some("worker-old".to_string());
+        stale_same_block.best_submitted_worker = Some("worker-old".to_string());
+        stale_same_block.share_count = 5;
+        stale_same_block.started_at = "2026-04-22T00:00:00Z".to_string();
+
+        let mut stale_old_block = test_block_window("old-runtime-old-block", 299, true);
+        stale_old_block.prevhash = "old-prevhash".to_string();
+
+        let history = test_block_window("history", 298, false);
+        let rows = merge_block_windows(
+            current,
+            vec![],
+            vec![stale_same_block, stale_old_block, history],
+            10,
+        );
+
+        let ids = rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>();
+        assert_eq!(ids, vec!["current-runtime", "history"]);
+        assert_eq!(rows[0].best_submitted_difficulty, 34.0);
+        assert_eq!(rows[0].best_worker.as_deref(), Some("worker-old"));
+        assert_eq!(rows[0].share_count, 7);
+        assert_eq!(rows[0].started_at, "2026-04-22T00:00:00Z");
     }
 }
 
