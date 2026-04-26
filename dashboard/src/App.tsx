@@ -1,11 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import {
   PoolStats, Miner, NetworkInfo, BlockRow, PublicBlockRow, BlockCandidateRow, BlockWindowRow, HashrateResponse,
-  fetchPool, fetchMiners, fetchHashrate,
-  fetchBlocks,
-  fetchBlockCandidates,
-  fetchBlockWindows,
-  fetchPublicBlocks,
+  fetchDashboardSnapshot,
   fmtHr, fmtDiff, fmtNetHash, fmtUptime, fmtBlockInterval, timeAgo, shortWorker, shortAddress, getFirmwareLabel,
   blockSubsidy, fmtBtc,
 } from "./api";
@@ -15,8 +11,7 @@ import BlockWindowsTable from "./components/BlockWindowsTable";
 import PublicBlocksTable from "./components/PublicBlocksTable";
 import "./styles.css";
 
-const REFRESH_MS = 5000;
-const PUBLIC_REFRESH_MS = 30000;
+const REFRESH_MS = 1000;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -1443,75 +1438,37 @@ export default function App() {
     if (loadingRef.current) return;
     loadingRef.current = true;
     try {
-      // [Fix 1] Fetch pool and miners in parallel; network info is now
-      // embedded inside /pool (networkDifficulty, networkHashps) so no
-      // separate /network call is needed — eliminates the duplicate
-      // getmininginfo RPC.
-      // [Fix 3] Use allSettled so a flaky /miners response does NOT flip
-      // the dashboard OFFLINE; pool health drives the LIVE indicator.
-      const [poolResult, minersResult, blocksResult, blockCandidatesResult, blockWindowsResult, hashrateResult] = await Promise.allSettled([
-        fetchPool(),
-        fetchMiners(),
-        fetchBlocks(),
-        fetchBlockCandidates(),
-        fetchBlockWindows(10),
-        fetchHashrate(),
-      ]);
+      const snapshot = await fetchDashboardSnapshot();
+      const p = snapshot.pool;
+      setPool(p);
+      setMiners(snapshot.miners);
+      setBlocks(snapshot.blocks);
+      setBlockCandidates(snapshot.blockCandidates);
+      setBlockWindows(snapshot.blockWindows);
+      setHashrate(snapshot.hashrate);
+      setPublicBlocks(snapshot.publicBlocks);
+      setNetwork({
+        blocks: p.blockHeight,
+        difficulty: p.networkDifficulty,
+        networkhashps: p.networkHashps,
+      });
+      setLive(true);
 
-      if (poolResult.status === "fulfilled") {
-        const p = poolResult.value;
-        setPool(p);
-        // Derive NetworkInfo from the pool response (same data, no extra RPC).
-        setNetwork({
-          blocks:       p.blockHeight,
-          difficulty:   p.networkDifficulty,
-          networkhashps: p.networkHashps,
-        });
-        setLive(true);
-
-        // [Fix 4] Celebrate on the FIRST real increment, including 0→1.
-        // initializedRef prevents false celebrations on initial page load
-        // when historical blocks already exist.
-        const newBlocks   = p.blocksFound ?? 0;
-        const newAccepted = p.submitblockAccepted ?? 0;
-        if (initializedRef.current) {
-          if (
-            newBlocks   > prevBlocksFound.current ||
-            newAccepted > prevSubmitAccepted.current
-          ) {
-            setCelebrating(true);
-          }
-        }
-        // Record baseline on every successful fetch.
-        initializedRef.current   = true;
-        prevBlocksFound.current  = newBlocks;
-        prevSubmitAccepted.current = newAccepted;
-      } else {
-        // [Fix 3] /pool itself failed → genuinely offline.
-        setLive(false);
+      // Celebrate on the first real increment, but not on initial page load.
+      const newBlocks = p.blocksFound ?? 0;
+      const newAccepted = p.submitblockAccepted ?? 0;
+      if (
+        initializedRef.current &&
+        (newBlocks > prevBlocksFound.current ||
+          newAccepted > prevSubmitAccepted.current)
+      ) {
+        setCelebrating(true);
       }
-
-      // [Fix 3] /miners failure keeps the previous miner list visible
-      // rather than clearing it or marking the pool as offline.
-      if (minersResult.status === "fulfilled") {
-        setMiners(minersResult.value);
-      }
-
-      if (blocksResult.status === "fulfilled") {
-        setBlocks(blocksResult.value);
-      }
-
-      if (blockCandidatesResult.status === "fulfilled") {
-        setBlockCandidates(blockCandidatesResult.value);
-      }
-
-      if (blockWindowsResult.status === "fulfilled") {
-        setBlockWindows(blockWindowsResult.value);
-      }
-
-      if (hashrateResult.status === "fulfilled") {
-        setHashrate(hashrateResult.value);
-      }
+      initializedRef.current = true;
+      prevBlocksFound.current = newBlocks;
+      prevSubmitAccepted.current = newAccepted;
+    } catch {
+      setLive(false);
     } finally {
       // [Fix 2] Always release the guard, even on errors.
       loadingRef.current = false;
@@ -1523,20 +1480,6 @@ export default function App() {
     const t = setInterval(load, REFRESH_MS);
     return () => clearInterval(t);
   }, [load]);
-
-  useEffect(() => {
-    let alive = true;
-    const loadPublic = async () => {
-      const rows = await fetchPublicBlocks();
-      if (alive) setPublicBlocks(rows);
-    };
-    loadPublic();
-    const t = setInterval(loadPublic, PUBLIC_REFRESH_MS);
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
-  }, []);
 
   return (
     <div className="bh-app">

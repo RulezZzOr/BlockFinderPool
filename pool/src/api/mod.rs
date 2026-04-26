@@ -1,5 +1,7 @@
-use std::sync::Arc;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration as StdDuration, Instant};
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -10,15 +12,22 @@ use chrono::{DateTime, Duration, Utc};
 use reqwest::Client;
 use serde::Deserialize;
 use serde::Serialize;
+use tokio::sync::RwLock;
 use tracing::info;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::build_info::{self, BuildInfo};
 use crate::config::Config;
-use crate::metrics::{MetricsStore, ShareEvent};
+use crate::metrics::{MetricsSnapshot, MetricsStore, MinerStats, ShareEvent};
 use crate::rpc::RpcClient;
-use crate::storage::{BlockCandidateRow as SqlBlockCandidateRow, BlockWindowRow as SqlBlockWindowRow, SqliteStore};
+use crate::storage::{
+    BlockCandidateRow as SqlBlockCandidateRow, BlockWindowRow as SqlBlockWindowRow, SqliteStore,
+};
 use crate::template::{JobTemplate, TemplateEngine};
+
+const MINING_INFO_CACHE_TTL: StdDuration = StdDuration::from_secs(1);
+const PUBLIC_BLOCKS_CACHE_TTL: StdDuration = StdDuration::from_secs(30);
+const DASHBOARD_DB_CACHE_TTL: StdDuration = StdDuration::from_secs(5);
 
 #[derive(Clone)]
 pub struct ApiServer {
@@ -56,6 +65,16 @@ impl ApiServer {
             config: self.config.clone(),
             template_engine: self.template_engine.clone(),
             started_at: self.started_at,
+            mining_info_cache: Arc::new(RwLock::new(None)),
+            mining_info_refreshing: Arc::new(AtomicBool::new(false)),
+            public_blocks_cache: Arc::new(RwLock::new(None)),
+            public_blocks_refreshing: Arc::new(AtomicBool::new(false)),
+            blocks_cache: Arc::new(RwLock::new(None)),
+            blocks_refreshing: Arc::new(AtomicBool::new(false)),
+            block_candidates_cache: Arc::new(RwLock::new(None)),
+            block_candidates_refreshing: Arc::new(AtomicBool::new(false)),
+            persisted_block_windows_cache: Arc::new(RwLock::new(None)),
+            persisted_block_windows_refreshing: Arc::new(AtomicBool::new(false)),
         };
 
         let cors = CorsLayer::new()
@@ -76,6 +95,7 @@ impl ApiServer {
             .route("/block-candidates/:id", get(block_candidate_detail))
             .route("/public-blocks", get(public_blocks))
             .route("/pool", get(pool))
+            .route("/dashboard-snapshot", get(dashboard_snapshot))
             .route("/network", get(network))
             .route("/blockfinder/status",            get(blackhole_status))
             .route("/blockfinder/miners",            get(blackhole_miners))
@@ -106,6 +126,47 @@ struct ApiState {
     config: Config,
     template_engine: Arc<TemplateEngine>,
     started_at: DateTime<Utc>,
+    mining_info_cache: Arc<RwLock<Option<CachedMiningInfo>>>,
+    mining_info_refreshing: Arc<AtomicBool>,
+    public_blocks_cache: Arc<RwLock<Option<CachedPublicBlocks>>>,
+    public_blocks_refreshing: Arc<AtomicBool>,
+    blocks_cache: Arc<RwLock<Option<CachedBlockRows>>>,
+    blocks_refreshing: Arc<AtomicBool>,
+    block_candidates_cache: Arc<RwLock<Option<CachedBlockCandidateRows>>>,
+    block_candidates_refreshing: Arc<AtomicBool>,
+    persisted_block_windows_cache: Arc<RwLock<Option<CachedPersistedBlockWindows>>>,
+    persisted_block_windows_refreshing: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+struct CachedMiningInfo {
+    value: Option<MiningInfo>,
+    fetched_at: Instant,
+}
+
+#[derive(Clone)]
+struct CachedPublicBlocks {
+    rows: Vec<PublicBlockRow>,
+    fetched_at: Instant,
+}
+
+#[derive(Clone)]
+struct CachedBlockRows {
+    rows: Vec<BlockRow>,
+    fetched_at: Instant,
+}
+
+#[derive(Clone)]
+struct CachedBlockCandidateRows {
+    rows: Vec<BlockCandidateRow>,
+    fetched_at: Instant,
+}
+
+#[derive(Clone)]
+struct CachedPersistedBlockWindows {
+    rows: Vec<SqlBlockWindowRow>,
+    limit: i64,
+    fetched_at: Instant,
 }
 
 async fn health() -> impl IntoResponse {
@@ -168,16 +229,21 @@ struct HashrateResponse {
 
 async fn hashrate(State(state): State<ApiState>) -> impl IntoResponse {
     let snapshot = state.metrics.snapshot().await;
-    let recent = build_share_series(state.metrics.recent_events(Duration::minutes(30)).await);
-
-    Json(HashrateResponse {
-        total_hashrate_gh: snapshot.total_hashrate_gh,
-        updated_at: snapshot.updated_at.to_rfc3339(),
-        recent,
-    })
+    Json(build_hashrate_response(&state, &snapshot).await)
 }
 
-#[derive(Serialize)]
+async fn build_hashrate_response(
+    state: &ApiState,
+    snapshot: &MetricsSnapshot,
+) -> HashrateResponse {
+    HashrateResponse {
+        total_hashrate_gh: snapshot.total_hashrate_gh,
+        updated_at: snapshot.updated_at.to_rfc3339(),
+        recent: build_share_series(state.metrics.recent_events(Duration::minutes(30)).await),
+    }
+}
+
+#[derive(Clone, Serialize)]
 struct BlockRow {
     height: i64,
     hash: String,
@@ -186,7 +252,7 @@ struct BlockRow {
     created_at: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct PublicBlockRow {
     height: i64,
     hash: String,
@@ -194,7 +260,7 @@ struct PublicBlockRow {
     pool: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[allow(non_snake_case)]
 struct BlockCandidateRow {
     timestamp: String,
@@ -233,12 +299,16 @@ struct MempoolPool {
 }
 
 async fn blocks(State(state): State<ApiState>) -> impl IntoResponse {
+    Json(cached_block_rows(&state).await)
+}
+
+async fn fetch_block_rows(state: &ApiState) -> Vec<BlockRow> {
     let rows = match state.sqlite.fetch_blocks(50).await {
         Ok(rows) => rows,
         Err(_) => vec![],
     };
 
-    let blocks = rows
+    rows
         .into_iter()
         .map(|(height, hash, found_by, status, created_at)| BlockRow {
             height,
@@ -247,8 +317,43 @@ async fn blocks(State(state): State<ApiState>) -> impl IntoResponse {
             status,
             created_at,
         })
-        .collect::<Vec<_>>();
-    Json(blocks)
+        .collect::<Vec<_>>()
+}
+
+async fn cached_block_rows(state: &ApiState) -> Vec<BlockRow> {
+    let now = Instant::now();
+    if let Some(cache) = state.blocks_cache.read().await.clone() {
+        if now.duration_since(cache.fetched_at) <= DASHBOARD_DB_CACHE_TTL {
+            return cache.rows;
+        }
+
+        if state
+            .blocks_refreshing
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            let state_for_refresh = state.clone();
+            tokio::spawn(async move {
+                let _ = refresh_block_rows_cache(&state_for_refresh).await;
+                state_for_refresh
+                    .blocks_refreshing
+                    .store(false, Ordering::Relaxed);
+            });
+        }
+        return cache.rows;
+    }
+
+    refresh_block_rows_cache(state).await
+}
+
+async fn refresh_block_rows_cache(state: &ApiState) -> Vec<BlockRow> {
+    let rows = fetch_block_rows(state).await;
+    let mut cache = state.blocks_cache.write().await;
+    *cache = Some(CachedBlockRows {
+        rows: rows.clone(),
+        fetched_at: Instant::now(),
+    });
+    rows
 }
 
 #[derive(Deserialize)]
@@ -261,6 +366,10 @@ async fn block_windows(
     State(state): State<ApiState>,
 ) -> impl IntoResponse {
     let limit = query.limit.unwrap_or(10).clamp(1, 50);
+    Json(fetch_block_window_rows(&state, limit).await)
+}
+
+async fn fetch_block_window_rows(state: &ApiState, limit: usize) -> Vec<SqlBlockWindowRow> {
     let current_template_age_secs = state.template_engine.template_age_secs();
     let current = state
         .metrics
@@ -274,13 +383,58 @@ async fn block_windows(
         .into_iter()
         .map(SqlBlockWindowRow::from)
         .collect::<Vec<_>>();
-    let persisted_limit = limit.saturating_sub(1) as i64;
-    let persisted = match state.sqlite.fetch_block_windows(persisted_limit).await {
+    let persisted_limit = (limit + finalized_pending.len() + 1).min(100) as i64;
+    let persisted = cached_persisted_block_windows(state, persisted_limit).await;
+    merge_block_windows(current, finalized_pending, persisted, limit)
+}
+
+async fn cached_persisted_block_windows(
+    state: &ApiState,
+    persisted_limit: i64,
+) -> Vec<SqlBlockWindowRow> {
+    let now = Instant::now();
+    if let Some(cache) = state.persisted_block_windows_cache.read().await.clone() {
+        if cache.limit >= persisted_limit
+            && now.duration_since(cache.fetched_at) <= DASHBOARD_DB_CACHE_TTL
+        {
+            return cache.rows.into_iter().take(persisted_limit as usize).collect();
+        }
+
+        if state
+            .persisted_block_windows_refreshing
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            let state_for_refresh = state.clone();
+            let refresh_limit = persisted_limit.max(cache.limit);
+            tokio::spawn(async move {
+                let _ = refresh_persisted_block_windows_cache(&state_for_refresh, refresh_limit).await;
+                state_for_refresh
+                    .persisted_block_windows_refreshing
+                    .store(false, Ordering::Relaxed);
+            });
+        }
+        return cache.rows.into_iter().take(persisted_limit as usize).collect();
+    }
+
+    refresh_persisted_block_windows_cache(state, persisted_limit).await
+}
+
+async fn refresh_persisted_block_windows_cache(
+    state: &ApiState,
+    persisted_limit: i64,
+) -> Vec<SqlBlockWindowRow> {
+    let rows = match state.sqlite.fetch_block_windows(persisted_limit).await {
         Ok(rows) => rows,
         Err(_) => vec![],
     };
-    let rows = merge_block_windows(current, finalized_pending, persisted, limit);
-    Json(rows)
+    let mut cache = state.persisted_block_windows_cache.write().await;
+    *cache = Some(CachedPersistedBlockWindows {
+        rows: rows.clone(),
+        limit: persisted_limit,
+        fetched_at: Instant::now(),
+    });
+    rows
 }
 
 fn merge_block_windows(
@@ -290,21 +444,30 @@ fn merge_block_windows(
     limit: usize,
 ) -> Vec<SqlBlockWindowRow> {
     let mut rows = Vec::<SqlBlockWindowRow>::new();
-    rows.push(current);
-    rows.extend(finalized_pending.into_iter().rev());
-    let seen: HashSet<String> = rows.iter().map(|row| row.id.clone()).collect();
-    rows.extend(persisted.into_iter().filter(|row| !seen.contains(&row.id)));
+    let mut seen = HashSet::<String>::new();
+    for row in std::iter::once(current)
+        .chain(finalized_pending.into_iter().rev())
+        .chain(persisted)
+    {
+        if seen.insert(row.id.clone()) {
+            rows.push(row);
+        }
+    }
     rows.truncate(limit);
     rows
 }
 
 async fn block_candidates(State(state): State<ApiState>) -> impl IntoResponse {
+    Json(cached_block_candidate_rows(&state).await)
+}
+
+async fn fetch_block_candidate_rows(state: &ApiState) -> Vec<BlockCandidateRow> {
     let rows = match state.sqlite.fetch_block_candidates(30).await {
         Ok(rows) => rows,
         Err(_) => vec![],
     };
 
-    let candidates = rows
+    rows
         .into_iter()
         .map(|row: SqlBlockCandidateRow| BlockCandidateRow {
             timestamp: row.timestamp,
@@ -317,9 +480,43 @@ async fn block_candidates(State(state): State<ApiState>) -> impl IntoResponse {
             submitblock_rpc_latency_ms: row.submitblock_latency_ms,
             rpc_error: row.rpc_error,
         })
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>()
+}
 
-    Json(candidates)
+async fn cached_block_candidate_rows(state: &ApiState) -> Vec<BlockCandidateRow> {
+    let now = Instant::now();
+    if let Some(cache) = state.block_candidates_cache.read().await.clone() {
+        if now.duration_since(cache.fetched_at) <= DASHBOARD_DB_CACHE_TTL {
+            return cache.rows;
+        }
+
+        if state
+            .block_candidates_refreshing
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            let state_for_refresh = state.clone();
+            tokio::spawn(async move {
+                let _ = refresh_block_candidate_rows_cache(&state_for_refresh).await;
+                state_for_refresh
+                    .block_candidates_refreshing
+                    .store(false, Ordering::Relaxed);
+            });
+        }
+        return cache.rows;
+    }
+
+    refresh_block_candidate_rows_cache(state).await
+}
+
+async fn refresh_block_candidate_rows_cache(state: &ApiState) -> Vec<BlockCandidateRow> {
+    let rows = fetch_block_candidate_rows(state).await;
+    let mut cache = state.block_candidates_cache.write().await;
+    *cache = Some(CachedBlockCandidateRows {
+        rows: rows.clone(),
+        fetched_at: Instant::now(),
+    });
+    rows
 }
 
 async fn block_candidate_detail(
@@ -355,14 +552,64 @@ async fn block_candidate_detail(
     }
 }
 
-async fn public_blocks() -> impl IntoResponse {
+async fn public_blocks(State(state): State<ApiState>) -> impl IntoResponse {
+    Json(cached_public_blocks(&state).await)
+}
+
+async fn cached_public_blocks(state: &ApiState) -> Vec<PublicBlockRow> {
+    let now = Instant::now();
+    if let Some(cache) = state.public_blocks_cache.read().await.clone() {
+        if now.duration_since(cache.fetched_at) <= PUBLIC_BLOCKS_CACHE_TTL {
+            return cache.rows;
+        }
+
+        if !cache.rows.is_empty() {
+            if state
+                .public_blocks_refreshing
+                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                let state_for_refresh = state.clone();
+                tokio::spawn(async move {
+                    let _ = refresh_public_blocks_cache(&state_for_refresh).await;
+                    state_for_refresh
+                        .public_blocks_refreshing
+                        .store(false, Ordering::Relaxed);
+                });
+            }
+            return cache.rows;
+        }
+    }
+
+    refresh_public_blocks_cache(state).await
+}
+
+async fn refresh_public_blocks_cache(state: &ApiState) -> Vec<PublicBlockRow> {
+    let fetched = fetch_public_blocks_from_mempool().await;
+    let mut cache = state.public_blocks_cache.write().await;
+    let rows = if fetched.is_empty() {
+        cache
+            .as_ref()
+            .map(|cached| cached.rows.clone())
+            .unwrap_or_default()
+    } else {
+        fetched
+    };
+    *cache = Some(CachedPublicBlocks {
+        rows: rows.clone(),
+        fetched_at: Instant::now(),
+    });
+    rows
+}
+
+async fn fetch_public_blocks_from_mempool() -> Vec<PublicBlockRow> {
     let client = match Client::builder()
         .connect_timeout(std::time::Duration::from_secs(2))
         .timeout(std::time::Duration::from_secs(5))
         .build()
     {
         Ok(client) => client,
-        Err(_) => return Json(Vec::<PublicBlockRow>::new()),
+        Err(_) => return Vec::new(),
     };
 
     let tip_height = match client
@@ -373,9 +620,9 @@ async fn public_blocks() -> impl IntoResponse {
     {
         Ok(response) => match response.text().await.ok().and_then(|s| s.trim().parse::<i64>().ok()) {
             Some(height) => height,
-            None => return Json(Vec::<PublicBlockRow>::new()),
+            None => return Vec::new(),
         },
-        Err(_) => return Json(Vec::<PublicBlockRow>::new()),
+        Err(_) => return Vec::new(),
     };
 
     let blocks = match client
@@ -386,12 +633,12 @@ async fn public_blocks() -> impl IntoResponse {
     {
         Ok(response) => match response.json::<Vec<MempoolBlock>>().await {
             Ok(blocks) => blocks,
-            Err(_) => return Json(Vec::<PublicBlockRow>::new()),
+            Err(_) => return Vec::new(),
         },
-        Err(_) => return Json(Vec::<PublicBlockRow>::new()),
+        Err(_) => return Vec::new(),
     };
 
-    let rows = blocks
+    blocks
         .into_iter()
         .take(10)
         .filter_map(|block| {
@@ -412,9 +659,7 @@ async fn public_blocks() -> impl IntoResponse {
                 pool,
             })
         })
-        .collect::<Vec<_>>();
-
-    Json(rows)
+        .collect::<Vec<_>>()
 }
 
 #[derive(Serialize)]
@@ -494,14 +739,61 @@ struct PoolInfo {
     networkHashps: f64,
 }
 
+#[derive(Serialize)]
+#[allow(non_snake_case)]
+struct DashboardSnapshot {
+    pool: PoolInfo,
+    miners: Vec<MinerStats>,
+    blocks: Vec<BlockRow>,
+    blockCandidates: Vec<BlockCandidateRow>,
+    blockWindows: Vec<SqlBlockWindowRow>,
+    hashrate: HashrateResponse,
+    publicBlocks: Vec<PublicBlockRow>,
+}
+
+async fn dashboard_snapshot(State(state): State<ApiState>) -> impl IntoResponse {
+    let snapshot = state.metrics.snapshot().await;
+    let mining_info = cached_mining_info(&state).await;
+    let pool = build_pool_info_from_snapshot(&state, &snapshot, mining_info.as_ref());
+    let hashrate = build_hashrate_response(&state, &snapshot).await;
+    let miners = snapshot.miners.clone();
+    let (blocks, block_candidates, block_windows, public_blocks) = tokio::join!(
+        cached_block_rows(&state),
+        cached_block_candidate_rows(&state),
+        fetch_block_window_rows(&state, 10),
+        cached_public_blocks(&state),
+    );
+
+    Json(DashboardSnapshot {
+        pool,
+        miners,
+        blocks,
+        blockCandidates: block_candidates,
+        blockWindows: block_windows,
+        hashrate,
+        publicBlocks: public_blocks,
+    })
+}
+
 async fn pool(State(state): State<ApiState>) -> impl IntoResponse {
     let snapshot = state.metrics.snapshot().await;
+    let mining_info = cached_mining_info(&state).await;
+    Json(build_pool_info_from_snapshot(
+        &state,
+        &snapshot,
+        mining_info.as_ref(),
+    ))
+}
+
+fn build_pool_info_from_snapshot(
+    state: &ApiState,
+    snapshot: &MetricsSnapshot,
+    mining_info: Option<&MiningInfo>,
+) -> PoolInfo {
     let total_hashrate = snapshot.total_hashrate_gh * 1_000_000_000.0;
     let total_miners = snapshot.miners.len();
     let blocks_found = snapshot.total_blocks;
-    // One call; fields are reused for networkDifficulty/networkHashps below.
-    let mining_info = fetch_mining_info(&state.rpc).await.ok();
-    let block_height = mining_info.as_ref().map(|i| i.blocks).unwrap_or(0);
+    let block_height = mining_info.map(|i| i.blocks).unwrap_or(0);
     let c = &state.metrics.counters;
 
     let total_stales_all = c.stales_new_block() + c.stales_expired() + c.stales_reconnect();
@@ -522,7 +814,7 @@ async fn pool(State(state): State<ApiState>) -> impl IntoResponse {
     let jobs_sent_per_miner = c.jobs_sent() as f64 / miners_count;
     let jobs_sent_per_miner_per_min = jobs_sent_per_miner / uptime_min;
 
-    Json(PoolInfo {
+    PoolInfo {
         totalHashRate: total_hashrate,
         totalMiners: total_miners,
         blockHeight: block_height,
@@ -599,9 +891,9 @@ async fn pool(State(state): State<ApiState>) -> impl IntoResponse {
         previousBlockTemplateKey: snapshot.previous_scope.as_ref().map(|s| s.template_key.clone()).unwrap_or_default(),
         previousBlockJobId: snapshot.previous_scope.as_ref().map(|s| s.job_id.clone()).unwrap_or_default(),
         previousBlockCreatedAt: snapshot.previous_scope.as_ref().map(|s| s.created_at.to_rfc3339()),
-        networkDifficulty: mining_info.as_ref().map(|i| i.difficulty).unwrap_or(0.0),
-        networkHashps:     mining_info.as_ref().and_then(|i| i.networkhashps).unwrap_or(0.0),
-    })
+        networkDifficulty: mining_info.map(|i| i.difficulty).unwrap_or(0.0),
+        networkHashps:     mining_info.and_then(|i| i.networkhashps).unwrap_or(0.0),
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -612,8 +904,7 @@ struct MiningInfo {
 }
 
 async fn network(State(state): State<ApiState>) -> impl IntoResponse {
-    let info = fetch_mining_info(&state.rpc).await.ok();
-    Json(info)
+    Json(cached_mining_info(&state).await)
 }
 
 #[derive(Serialize)]
@@ -911,6 +1202,46 @@ mod tests {
     use super::*;
     use serde_json::Value;
 
+    fn test_block_window(id: &str, height: i64, in_progress: bool) -> SqlBlockWindowRow {
+        SqlBlockWindowRow {
+            id: id.to_string(),
+            height,
+            prevhash: format!("prev-{id}"),
+            block_hash: if in_progress { None } else { Some(format!("hash-{id}")) },
+            started_at: "2026-04-22T00:00:00Z".to_string(),
+            ended_at: if in_progress {
+                None
+            } else {
+                Some("2026-04-22T00:10:00Z".to_string())
+            },
+            duration_secs: if in_progress { None } else { Some(600) },
+            external_pool: None,
+            tx_count: 1,
+            fee_rate_sat_vb: None,
+            best_submitted_difficulty: height as f64,
+            best_accepted_difficulty: height as f64,
+            best_block_candidate_difficulty: 0.0,
+            best_worker: Some(format!("worker-{id}")),
+            best_payout_address: None,
+            best_submitted_worker: Some(format!("worker-{id}")),
+            best_submitted_payout_address: None,
+            best_accepted_worker: Some(format!("worker-{id}")),
+            best_candidate_worker: None,
+            share_count: 1,
+            accepted_count: 1,
+            stale_count: 0,
+            duplicate_count: 0,
+            avg_pool_hashrate: None,
+            template_key: format!("tmpl-{id}"),
+            job_id: format!("job-{id}"),
+            network_difficulty: 1.0,
+            in_progress,
+            current_template_age_secs: if in_progress { Some(1) } else { None },
+            created_at: "2026-04-22T00:00:00Z".to_string(),
+            updated_at: "2026-04-22T00:10:00Z".to_string(),
+        }
+    }
+
     #[test]
     fn build_share_series_counts_accepted_only() {
         let now = Utc::now();
@@ -1198,10 +1529,62 @@ mod tests {
         assert_eq!(rows[1].id, "new");
         assert_eq!(rows[2].id, "old");
     }
+
+    #[test]
+    fn merge_block_windows_dedupes_current_without_underfilling_limit() {
+        let current = test_block_window("current", 200, true);
+        let persisted = vec![
+            test_block_window("current", 200, true),
+            test_block_window("hist-2", 199, false),
+            test_block_window("hist-1", 198, false),
+        ];
+
+        let rows = merge_block_windows(current, vec![], persisted, 3);
+        let ids = rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>();
+        assert_eq!(ids, vec!["current", "hist-2", "hist-1"]);
+    }
 }
 
 async fn fetch_mining_info(rpc: &RpcClient) -> anyhow::Result<MiningInfo> {
     rpc.call("getmininginfo", serde_json::json!([])).await
+}
+
+async fn cached_mining_info(state: &ApiState) -> Option<MiningInfo> {
+    let now = Instant::now();
+    if let Some(cache) = state.mining_info_cache.read().await.clone() {
+        if now.duration_since(cache.fetched_at) <= MINING_INFO_CACHE_TTL {
+            return cache.value;
+        }
+
+        if cache.value.is_some() {
+            if state
+                .mining_info_refreshing
+                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                let state_for_refresh = state.clone();
+                tokio::spawn(async move {
+                    let _ = refresh_mining_info_cache(&state_for_refresh).await;
+                    state_for_refresh
+                        .mining_info_refreshing
+                        .store(false, Ordering::Relaxed);
+                });
+            }
+            return cache.value;
+        }
+    }
+
+    refresh_mining_info_cache(state).await
+}
+
+async fn refresh_mining_info_cache(state: &ApiState) -> Option<MiningInfo> {
+    let value = fetch_mining_info(&state.rpc).await.ok();
+    let mut cache = state.mining_info_cache.write().await;
+    *cache = Some(CachedMiningInfo {
+        value: value.clone(),
+        fetched_at: Instant::now(),
+    });
+    value
 }
 
 fn parse_port(url: &str) -> Option<u16> {

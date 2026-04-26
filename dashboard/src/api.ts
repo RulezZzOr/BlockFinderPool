@@ -185,6 +185,16 @@ export type PublicBlockRow = {
   pool: string | null;
 };
 
+export type DashboardSnapshot = {
+  pool: PoolStats;
+  miners: Miner[];
+  blocks: BlockRow[];
+  blockCandidates: BlockCandidateRow[];
+  blockWindows: BlockWindowRow[];
+  hashrate: HashrateResponse | null;
+  publicBlocks: PublicBlockRow[];
+};
+
 export type NetworkInfo = {
   blocks: number;
   difficulty: number;
@@ -266,6 +276,9 @@ async function apiGetAll<T>(path: string): Promise<T[]> {
 // ─── API fetch functions ───────────────────────────────────────────────────────
 
 export const fetchPool = (): Promise<PoolStats> => apiGet<PoolStats>("/pool");
+
+export const fetchDashboardSnapshot = (): Promise<DashboardSnapshot> =>
+  apiGet<DashboardSnapshot>("/dashboard-snapshot");
 
 export const fetchTemplateInfo = async (): Promise<TemplateInfo | null> => {
   try {
