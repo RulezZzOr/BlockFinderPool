@@ -14,7 +14,6 @@ use std::time::Duration;
 /// drops real shares, including high-difficulty / best-share candidates.
 type DupKey = (u64, u32, u32, String, u32);
 
-use anyhow::Context;
 use chrono::Utc;
 use rand::RngCore;
 use serde::Deserialize;
@@ -47,14 +46,15 @@ use uuid::Uuid;
 use std::str::FromStr;
 
 use bitcoin::Address;
+use dashmap::DashMap;
 
 use crate::config::Config;
 use crate::metrics::{MetricsStore, StaleReason};
 use crate::share::{share_target_le, validate_share, ShareSubmit};
-use std::collections::HashSet;
 use crate::storage::{BlockCandidateRecord, RedisStore, ShareRecord, SqliteStore};
 use crate::template::{build_coinbase2_for_payout, JobTemplate, TemplateEngine};
 use crate::vardiff::VardiffController;
+use std::collections::HashSet;
 
 #[derive(Clone)]
 pub struct StratumServer {
@@ -63,6 +63,7 @@ pub struct StratumServer {
     metrics: MetricsStore,
     redis: RedisStore,
     sqlite: SqliteStore,
+    vardiff_cache: Arc<DashMap<String, VardiffController>>,
 }
 
 impl StratumServer {
@@ -79,6 +80,7 @@ impl StratumServer {
             metrics,
             redis,
             sqlite,
+            vardiff_cache: Arc::new(DashMap::new()),
         }
     }
 
@@ -233,7 +235,8 @@ impl StratumServer {
         let refresh_counters = self.metrics.counters.clone();
 
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(refresh_config.job_refresh_ms));
+            let mut interval =
+                tokio::time::interval(Duration::from_millis(refresh_config.job_refresh_ms));
             loop {
                 tokio::select! {
                     _ = refresh_tx.closed() => {
@@ -267,7 +270,8 @@ impl StratumServer {
                     // Help firmwares that don't roll ntime well: bump notify ntime on refresh.
                     // Never go below mintime/curtime (Bitcoin Core will reject blocks earlier than mintime).
                     let now_u32 = Utc::now().timestamp() as u32;
-                    let job_ntime_u32 = u32::from_str_radix(job.ntime.trim_start_matches("0x"), 16).unwrap_or(0);
+                    let job_ntime_u32 =
+                        u32::from_str_radix(job.ntime.trim_start_matches("0x"), 16).unwrap_or(0);
                     let min_ok = job.mintime_u32.max(job_ntime_u32);
                     let bumped_ntime = format!("{:08x}", now_u32.max(min_ok));
                     let diff = guard.difficulty;
@@ -276,7 +280,13 @@ impl StratumServer {
                         guard.push_job(job.clone(), diff, &extranonce1_bytes, Some(bumped_ntime));
                     guard.last_notify = Utc::now();
                     refresh_counters.inc_jobs_sent(false);
-                    build_notify_with_ntime(&session_job.session_job_id, session_job.job.as_ref(), &session_job.notify_ntime, false, session_job.custom_coinbase2_hex.as_deref())
+                    build_notify_with_ntime(
+                        &session_job.session_job_id,
+                        session_job.job.as_ref(),
+                        &session_job.notify_ntime,
+                        false,
+                        session_job.custom_coinbase2_hex.as_deref(),
+                    )
                 };
                 if refresh_tx.send(notify).await.is_err() {
                     break;
@@ -287,11 +297,13 @@ impl StratumServer {
         let vardiff_state = state.clone();
         let vardiff_tx = tx.clone();
         let vardiff_config = self.config.clone();
+        let vardiff_cache = self.vardiff_cache.clone();
         tokio::spawn(async move {
             if !vardiff_config.vardiff_enabled {
                 return;
             }
-            let interval_ms = (vardiff_config.vardiff_retarget_time_secs * 1000.0).max(1000.0) as u64;
+            let interval_ms =
+                (vardiff_config.vardiff_retarget_time_secs * 1000.0).max(1000.0) as u64;
             let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
             loop {
                 tokio::select! {
@@ -302,21 +314,25 @@ impl StratumServer {
                 }
                 let now = Utc::now();
 
-                let (diff_msg, notify_msg) = {
+                let (diff_msg, notify_msg, cache_update) = {
                     let mut guard = vardiff_state.lock().await;
                     if !guard.authorized {
-                        (None, None)
+                        (None, None, None)
                     } else {
                         let current_diff = guard.difficulty;
                         if let Some(new_diff) = guard.vardiff.maybe_retarget(current_diff, now) {
-                            guard.difficulty = new_diff;
+                            guard.set_difficulty(new_diff);
                             let diff_msg = Some(build_set_difficulty(new_diff));
 
                             let job_latest = guard.jobs.back().map(|entry| entry.job.clone());
                             let notify_msg = if let Some(job_latest) = job_latest {
                                 let extranonce1_bytes = guard.extranonce1_bytes.clone();
-                                let session_job =
-                                    guard.push_job(job_latest.clone(), new_diff, &extranonce1_bytes, None);
+                                let session_job = guard.push_job(
+                                    job_latest.clone(),
+                                    new_diff,
+                                    &extranonce1_bytes,
+                                    None,
+                                );
                                 guard.last_notify = Utc::now();
                                 guard.last_prevhash = Some(job_latest.prevhash_le.clone());
                                 Some(build_notify_with_ntime(
@@ -330,12 +346,20 @@ impl StratumServer {
                                 None
                             };
 
-                            (diff_msg, notify_msg)
+                            let cache_update = if guard.worker.is_empty() {
+                                None
+                            } else {
+                                Some((guard.worker.clone(), guard.vardiff.clone()))
+                            };
+                            (diff_msg, notify_msg, cache_update)
                         } else {
-                            (None, None)
+                            (None, None, None)
                         }
                     }
                 };
+                if let Some((worker, controller)) = cache_update {
+                    vardiff_cache.insert(worker, controller);
+                }
 
                 if let Some(m) = diff_msg {
                     if vardiff_tx.send(m).await.is_err() {
@@ -375,7 +399,8 @@ impl StratumServer {
             let read_result = tokio::time::timeout(
                 Duration::from_secs(IDLE_TIMEOUT_SECS),
                 lines.get_mut().read_until(b'\n', &mut buf),
-            ).await;
+            )
+            .await;
 
             let n = match read_result {
                 Err(_elapsed) => {
@@ -468,12 +493,28 @@ impl StratumServer {
                     let _ = tx.send(response.to_string()).await;
 
                     if authorized {
-                        let restored_difficulty = self
+                        let recent_difficulty = self
                             .metrics
                             .worker_last_difficulty(&worker)
                             .filter(|value| value.is_finite() && *value > 0.0)
-                            .unwrap_or(self.config.start_difficulty)
-                            .clamp(self.config.min_difficulty, self.config.max_difficulty);
+                            .map(|value| {
+                                value.clamp(self.config.min_difficulty, self.config.max_difficulty)
+                            });
+                        let restored_vardiff = recent_difficulty.and_then(|_| {
+                            self.vardiff_cache
+                                .get(&worker)
+                                .map(|entry| entry.clone())
+                                .filter(|controller| {
+                                    controller.is_compatible(
+                                        self.config.target_share_time_secs,
+                                        self.config.vardiff_retarget_time_secs,
+                                        self.config.min_difficulty,
+                                        self.config.max_difficulty,
+                                    )
+                                })
+                        });
+                        let restored_difficulty =
+                            recent_difficulty.unwrap_or(self.config.start_difficulty);
 
                         // Update session state quickly, but don't await while holding the lock.
                         let (difficulty, user_agent, session_id, extranonce1, diff_msg, notify_opt) = {
@@ -482,7 +523,10 @@ impl StratumServer {
                             guard.worker = worker.clone();
                             guard.session_payout_script = payout_script;
                             guard.session_payout_address = payout_address_str.clone();
-                            guard.difficulty = restored_difficulty;
+                            guard.set_difficulty(restored_difficulty);
+                            if let Some(controller) = restored_vardiff {
+                                guard.vardiff = controller;
+                            }
 
                             let difficulty = guard.difficulty;
                             let user_agent = guard.user_agent.clone();
@@ -495,8 +539,12 @@ impl StratumServer {
                             let notify_opt = if job.ready {
                                 guard.jobs.clear(); // fresh session — no grace needed
                                 let extranonce1_bytes = guard.extranonce1_bytes.clone();
-                                let session_job =
-                                    guard.push_job(job.clone(), difficulty, &extranonce1_bytes, None);
+                                let session_job = guard.push_job(
+                                    job.clone(),
+                                    difficulty,
+                                    &extranonce1_bytes,
+                                    None,
+                                );
                                 guard.last_notify = Utc::now();
                                 guard.last_prevhash = Some(job.prevhash_le.clone());
                                 Some(build_notify_with_ntime(
@@ -510,7 +558,14 @@ impl StratumServer {
                                 None
                             };
 
-                            (difficulty, user_agent, session_id, extranonce1, diff_msg, notify_opt)
+                            (
+                                difficulty,
+                                user_agent,
+                                session_id,
+                                extranonce1,
+                                diff_msg,
+                                notify_opt,
+                            )
                         };
 
                         // Log extranonce1 assignment for search-space verification.
@@ -576,19 +631,24 @@ impl StratumServer {
                                 .max(guard.difficulty)
                         } else {
                             // Fixed-diff mode: honour suggestion freely within min/max.
-                            suggested
-                                .clamp(self.config.min_difficulty, self.config.max_difficulty)
+                            suggested.clamp(self.config.min_difficulty, self.config.max_difficulty)
                         };
                         // Keep exact integer difficulty steps so vardiff can move
                         // down smoothly instead of getting stuck on coarse buckets.
                         let target = guard.vardiff.clamp_diff(raw);
                         if (target - guard.difficulty).abs() > f64::EPSILON {
-                            guard.difficulty = target;
+                            guard.set_difficulty(target);
                             let diff_msg = build_set_difficulty(target);
-                            let notify_msg = if let Some(job_latest) = guard.jobs.back().map(|e| e.job.clone()) {
+                            let notify_msg = if let Some(job_latest) =
+                                guard.jobs.back().map(|e| e.job.clone())
+                            {
                                 let extranonce1_bytes = guard.extranonce1_bytes.clone();
-                                let session_job =
-                                    guard.push_job(job_latest.clone(), target, &extranonce1_bytes, None);
+                                let session_job = guard.push_job(
+                                    job_latest.clone(),
+                                    target,
+                                    &extranonce1_bytes,
+                                    None,
+                                );
                                 guard.last_notify = Utc::now();
                                 guard.last_prevhash = Some(job_latest.prevhash_le.clone());
                                 Some(build_notify_with_ntime(
@@ -619,8 +679,7 @@ impl StratumServer {
                     let _ = tx.send(response.to_string()).await;
                 }
                 "mining.submit" => {
-                    self.handle_submit(&request, &state, &tx)
-                        .await?;
+                    self.handle_submit(&request, &state, &tx).await?;
                 }
                 "mining.configure" => {
                     // BIP310 protocol constant — must never change.
@@ -632,7 +691,8 @@ impl StratumServer {
                         .and_then(|value| value.get("version-rolling.mask"))
                         .and_then(|value| value.as_str())
                         .unwrap_or("1fffe000");
-                    let parsed_mask = u32::from_str_radix(requested_mask, 16).unwrap_or(allowed_mask);
+                    let parsed_mask =
+                        u32::from_str_radix(requested_mask, 16).unwrap_or(allowed_mask);
                     let configured_mask = parsed_mask & allowed_mask;
                     let mask_hex = format!("{:08x}", configured_mask);
                     {
@@ -663,12 +723,14 @@ impl StratumServer {
         Ok(())
     }
 
-    async fn handle_authorize(&self, request: &StratumRequest) -> (String, bool, Option<Vec<u8>>, Option<String>) {
+    async fn handle_authorize(
+        &self,
+        request: &StratumRequest,
+    ) -> (String, bool, Option<Vec<u8>>, Option<String>) {
         let params = request.params.as_array().cloned().unwrap_or_default();
-        let worker = canonicalize_authorize_worker(
-            params.get(0).and_then(|v| v.as_str()).unwrap_or(""),
-        )
-        .to_string();
+        let worker =
+            canonicalize_authorize_worker(params.get(0).and_then(|v| v.as_str()).unwrap_or(""))
+                .to_string();
         let password = params.get(1).and_then(|v| v.as_str()).unwrap_or("");
 
         let authorized = if let Some(token) = &self.config.auth_token {
@@ -814,9 +876,20 @@ impl StratumServer {
             return Ok(());
         }
 
-
         // Grab everything needed for validation with a short lock (no await-heavy work inside).
-        let (version_mask, session_job, last_notify, session_start, vardiff_enabled, session_worker, session_session_id, session_extranonce1, session_payout_address, early_reply, stale_reason) = {
+        let (
+            version_mask,
+            session_job,
+            last_notify,
+            session_start,
+            vardiff_enabled,
+            session_worker,
+            session_session_id,
+            session_extranonce1,
+            session_payout_address,
+            early_reply,
+            stale_reason,
+        ) = {
             let guard = state.lock().await;
 
             if !guard.authorized {
@@ -871,7 +944,7 @@ impl StratumServer {
                         // Expired: all other cases — job simply aged out or unknown
                         //   job ID (e.g. miner resumed from a paused state).
                         let session_age_secs = (now - guard.session_start).num_seconds();
-                        let notify_delay_ms  = (now - guard.last_notify).num_milliseconds();
+                        let notify_delay_ms = (now - guard.last_notify).num_milliseconds();
                         let reason = if session_age_secs < self.config.reconnect_recent_secs {
                             StaleReason::Reconnect
                         } else {
@@ -882,7 +955,10 @@ impl StratumServer {
                         };
                         tracing::warn!(
                             "stale share: worker={} reason={:?} session_age={}s notify_delay={}ms",
-                            stale_worker, reason, session_age_secs, notify_delay_ms
+                            stale_worker,
+                            reason,
+                            session_age_secs,
+                            notify_delay_ms
                         );
                         let response = json!({
                             "id": request.id,
@@ -922,8 +998,11 @@ impl StratumServer {
             None => return Ok(()),
         };
 
-
-        let worker = if !session_worker.is_empty() { session_worker } else { submitted_worker.clone() };
+        let worker = if !session_worker.is_empty() {
+            session_worker
+        } else {
+            submitted_worker.clone()
+        };
         let session_id = session_session_id;
         let job = session_job.job.clone();
         let job_diff = session_job.difficulty;
@@ -936,21 +1015,20 @@ impl StratumServer {
         // rejected immediately with error [20].  Silent acceptance would build a
         // block whose nVersion contains bits the pool never agreed to roll,
         // which Bitcoin Core may reject as invalid.
-        let (version, version_outside_mask) = if let Some(submit_val) =
-            submit_version.as_deref().and_then(parse_u32_be)
-        {
-            let job_val = parse_u32_be(&job.version).unwrap_or(job.version_u32);
-            let submit_outside = submit_val & !version_mask;
-            let job_outside   = job_val   & !version_mask;
-            // outside_mismatch: miner changed bits the pool did not authorise.
-            let outside_mismatch = submit_outside != 0 && submit_outside != job_outside;
-            // Always use the safe combined value; never let the miner's raw bits
-            // outside the mask reach block construction.
-            let combined = (job_val & !version_mask) | (submit_val & version_mask);
-            (Some(format!("{:08x}", combined)), outside_mismatch)
-        } else {
-            (None, false) // validate_share will fall back to job.version_u32
-        };
+        let (version, version_outside_mask) =
+            if let Some(submit_val) = submit_version.as_deref().and_then(parse_u32_be) {
+                let job_val = parse_u32_be(&job.version).unwrap_or(job.version_u32);
+                let submit_outside = submit_val & !version_mask;
+                let job_outside = job_val & !version_mask;
+                // outside_mismatch: miner changed bits the pool did not authorise.
+                let outside_mismatch = submit_outside != 0 && submit_outside != job_outside;
+                // Always use the safe combined value; never let the miner's raw bits
+                // outside the mask reach block construction.
+                let combined = (job_val & !version_mask) | (submit_val & version_mask);
+                (Some(format!("{:08x}", combined)), outside_mismatch)
+            } else {
+                (None, false) // validate_share will fall back to job.version_u32
+            };
 
         if version_outside_mask {
             self.metrics.counters.inc_version_rolling_violation();
@@ -1053,15 +1131,16 @@ impl StratumServer {
             session_job.job.as_ref(),
             session_job.coinbase_prefix.as_slice(),
             &submit,
-            &session_job.share_target_le,   // ← 256-bit LE target
-            session_job.custom_coinbase2_bytes.as_deref().map(|v| v.as_slice()),
+            &session_job.share_target_le, // ← 256-bit LE target
+            session_job
+                .custom_coinbase2_bytes
+                .as_deref()
+                .map(|v| v.as_slice()),
         ) {
             Ok(r) => r,
             Err(err) => {
                 // Malformed input (non-hex nonce/ntime, etc.) — reject without closing.
-                tracing::warn!(
-                    "share validation input error worker={worker}: {err:?}"
-                );
+                tracing::warn!("share validation input error worker={worker}: {err:?}");
                 let resp = json!({
                     "id": request.id,
                     "result": false,
@@ -1098,15 +1177,15 @@ impl StratumServer {
         // Raw best-share accounting is updated immediately after the hash is known,
         // before duplicate rejection or any persistence work.
         let is_stale_block = session_job.is_stale_block.load(Ordering::Acquire);
-            self.metrics
-                .record_raw_share(
-                    &worker,
-                    session_payout_address.as_deref(),
-                    session_job.difficulty,
-                    result.difficulty,
-                    result.is_block,
-                    is_stale_block,
-                )
+        self.metrics
+            .record_raw_share(
+                &worker,
+                session_payout_address.as_deref(),
+                session_job.difficulty,
+                result.difficulty,
+                result.is_block,
+                is_stale_block,
+            )
             .await;
 
         // High-priority submitblock path: fire before duplicate/reject bookkeeping
@@ -1116,24 +1195,26 @@ impl StratumServer {
                 tracing::warn!(
                     "GRACE-BLOCK: worker={worker} found hash below target on stale-block job \
                      height={} hash={} — NOT submitting (wrong prevhash, grace window)",
-                    job.height, result.hash_hex
+                    job.height,
+                    result.hash_hex
                 );
             } else if result.block_hex.is_some() {
-                let block_hex_owned   = result.block_hex.clone().unwrap();
+                let block_hex_owned = result.block_hex.clone().unwrap();
                 let coinbase_hex_owned = result.coinbase_hex.clone().unwrap_or_default();
-                let block_hash        = result.hash_hex.clone();
-                let template_key      = job.template_key.clone();
-                let txid_root         = job.txid_partial_root.clone();
-                let witness           = job.witness_commitment_script.clone().unwrap_or_default();
-                let height            = job.height;
-                let persist_blocks    = self.config.persist_blocks;
-                let engine            = self.template_engine.clone();
-                let sqlite_for_block  = self.sqlite.clone();
-                let found_by          = worker.to_owned();
-                let requested_at     = Utc::now();
-                let version_str      = version.clone().unwrap_or_else(|| job.version.clone());
-                let version_mask_str  = format!("{:08x}", version_mask);
-                let merkle_root_hex  = header_merkle_root_hex(&result.header_hex).unwrap_or_else(|| job.txid_partial_root.clone());
+                let block_hash = result.hash_hex.clone();
+                let template_key = job.template_key.clone();
+                let txid_root = job.txid_partial_root.clone();
+                let witness = job.witness_commitment_script.clone().unwrap_or_default();
+                let height = job.height;
+                let persist_blocks = self.config.persist_blocks;
+                let engine = self.template_engine.clone();
+                let sqlite_for_block = self.sqlite.clone();
+                let found_by = worker.to_owned();
+                let requested_at = Utc::now();
+                let version_str = version.clone().unwrap_or_else(|| job.version.clone());
+                let version_mask_str = format!("{:08x}", version_mask);
+                let merkle_root_hex = header_merkle_root_hex(&result.header_hex)
+                    .unwrap_or_else(|| job.txid_partial_root.clone());
                 let candidate_record = BlockCandidateRecord {
                     id: Uuid::new_v4(),
                     worker: worker.clone(),
@@ -1166,14 +1247,22 @@ impl StratumServer {
                 tracing::info!(
                     "*** BLOCK FOUND by {worker} height={height} hash={block_hash} \
                      diff={:.2} template_key=\"{}\" ***",
-                    result.difficulty, job.template_key,
+                    result.difficulty,
+                    job.template_key,
                 );
                 tokio::spawn(async move {
                     let submit_started = std::time::Instant::now();
-                    let (status, rpc_error) = match engine.submit_block(
-                        &block_hex_owned, &block_hash, &template_key,
-                        &coinbase_hex_owned, &txid_root, &witness,
-                    ).await {
+                    let (status, rpc_error) = match engine
+                        .submit_block(
+                            &block_hex_owned,
+                            &block_hash,
+                            &template_key,
+                            &coinbase_hex_owned,
+                            &txid_root,
+                            &witness,
+                        )
+                        .await
+                    {
                         Ok(_) => {
                             tracing::info!("BLOCK SUBMITTED OK height={height} hash={block_hash}");
                             ("submitted", None)
@@ -1187,23 +1276,28 @@ impl StratumServer {
                     };
                     let mut candidate_record = candidate_record;
                     candidate_record.submitblock_result = status.to_string();
-                    candidate_record.submitblock_latency_ms = submit_started.elapsed().as_millis() as i64;
+                    candidate_record.submitblock_latency_ms =
+                        submit_started.elapsed().as_millis() as i64;
                     candidate_record.rpc_error = rpc_error;
-                    if let Err(err) = sqlite_for_block.insert_block_candidate(candidate_record).await {
+                    if let Err(err) = sqlite_for_block
+                        .insert_block_candidate(candidate_record)
+                        .await
+                    {
                         tracing::error!(
                             "failed to persist block candidate forensic record: {err:?}"
                         );
                     }
                     if persist_blocks {
-                        if let Err(err) = sqlite_for_block.insert_block(
-                            height as i64,
-                            &block_hash,
-                            Some(found_by.as_str()),
-                            status,
-                        ).await {
-                            tracing::error!(
-                                "failed to persist found block summary: {err:?}"
-                            );
+                        if let Err(err) = sqlite_for_block
+                            .insert_block(
+                                height as i64,
+                                &block_hash,
+                                Some(found_by.as_str()),
+                                status,
+                            )
+                            .await
+                        {
+                            tracing::error!("failed to persist found block summary: {err:?}");
                         }
                     }
                 });
@@ -1260,7 +1354,10 @@ impl StratumServer {
                     );
                 }
             }
-            tracing::debug!("share rejected (worker={worker}) diff={:.2}", result.difficulty);
+            tracing::debug!(
+                "share rejected (worker={worker}) diff={:.2}",
+                result.difficulty
+            );
         }
 
         if duplicate {
@@ -1271,16 +1368,21 @@ impl StratumServer {
             );
         }
 
-        let ack_error = if final_accepted { serde_json::Value::Null }
-                        else { json!([23, "Low difficulty share", null]) };
-        let ack_msg = json!({"id": request.id, "result": final_accepted, "error": ack_error}).to_string();
+        let ack_error = if final_accepted {
+            serde_json::Value::Null
+        } else {
+            json!([23, "Low difficulty share", null])
+        };
+        let ack_msg =
+            json!({"id": request.id, "result": final_accepted, "error": ack_error}).to_string();
         if tx.send(ack_msg).await.is_err() {
             // TCP connection closed before ACK — log only for block candidates to avoid noise.
             if result.is_block {
                 tracing::error!(
                     "BLOCK ACK SEND FAILED: worker={worker} height={} hash={} — \
                      block already queued for submitblock (miner disconnected mid-submit)",
-                    job.height, result.hash_hex
+                    job.height,
+                    result.hash_hex
                 );
             }
             return Ok(());
@@ -1290,15 +1392,16 @@ impl StratumServer {
         // Must run before persist_shares (needs session_diff_after) and before
         // outbound_msgs are sent (set_difficulty / notify follow in TCP stream order).
         let mut outbound_msgs: Vec<String> = Vec::new();
-        let mut session_diff_after = 0.0f64;
-        let mut effective_job_diff = job_diff;
+        let session_diff_after: f64;
+        let effective_job_diff: f64;
+        let mut vardiff_cache_update: Option<(String, VardiffController)> = None;
         {
             let mut guard = state.lock().await;
 
             if vardiff_enabled {
                 let current_diff = guard.difficulty;
                 if let Some(new_diff) = guard.vardiff.maybe_retarget(current_diff, now) {
-                    guard.difficulty = new_diff;
+                    guard.set_difficulty(new_diff);
                     outbound_msgs.push(build_set_difficulty(new_diff));
 
                     if let Some(job_latest) = guard.jobs.back().map(|entry| entry.job.clone()) {
@@ -1328,6 +1431,12 @@ impl StratumServer {
             if final_accepted {
                 guard.vardiff.record_share(now, effective_job_diff);
             }
+            if vardiff_enabled && !guard.worker.is_empty() {
+                vardiff_cache_update = Some((guard.worker.clone(), guard.vardiff.clone()));
+            }
+        }
+        if let Some((worker, controller)) = vardiff_cache_update {
+            self.vardiff_cache.insert(worker, controller);
         }
 
         // ── Post-ack: round-trip proof logging ───────────────────────────────────
@@ -1354,12 +1463,21 @@ impl StratumServer {
                      prevhash_header_le={} nbits={} \
                      merkle_branches=[{}] \
                      header_hex={} hash_hex={} diff={:.2}",
-                    worker, session_job.session_job_id,
-                    extranonce1_for_proof, extranonce2_clean, ntime_clean, nonce_clean,
+                    worker,
+                    session_job.session_job_id,
+                    extranonce1_for_proof,
+                    extranonce2_clean,
+                    ntime_clean,
+                    nonce_clean,
                     version_final,
-                    job.coinbase1, job.coinbase2, job.prevhash_le, job.nbits,
+                    job.coinbase1,
+                    job.coinbase2,
+                    job.prevhash_le,
+                    job.nbits,
                     job.merkle_branches.join(","),
-                    result.header_hex, result.hash_hex, result.difficulty,
+                    result.header_hex,
+                    result.hash_hex,
+                    result.difficulty,
                 );
             }
         }
@@ -1380,13 +1498,13 @@ impl StratumServer {
         //   • best summary persistence is periodic; share history stays optional
         //   • worker is moved into the spawn (not used after this point in the handler)
         {
-            let metrics_s      = self.metrics.clone();
-            let redis_s        = self.redis.clone();
-            let sqlite_s       = self.sqlite.clone();
+            let metrics_s = self.metrics.clone();
+            let redis_s = self.redis.clone();
+            let sqlite_s = self.sqlite.clone();
             let persist_shares = self.config.persist_shares;
-            let accepted       = final_accepted;
-            let is_block       = result.is_block;
-            let share_diff     = result.difficulty;
+            let accepted = final_accepted;
+            let is_block = result.is_block;
+            let share_diff = result.difficulty;
             // Build ShareRecord before spawn so Uuid is generated on the session task.
             // difficulty = share_diff (DIFF1/hash — actual work done by the miner), NOT job_diff
             // (job_diff is the session acceptance threshold, not the hash quality).
@@ -1439,7 +1557,6 @@ impl StratumServer {
 
         Ok(())
     }
-
 }
 
 #[derive(Debug, Deserialize)]
@@ -1468,8 +1585,8 @@ struct StratumRequest {
 ///   • Token bucket allows bursts (e.g. connect + first job) while still rate-limiting floods.
 ///   • clean_jobs bypass ensures zero delay on block changes regardless of bucket state.
 struct NotifyBucket {
-    tokens:      f64,
-    capacity:    f64,
+    tokens: f64,
+    capacity: f64,
     /// tokens added per millisecond (= 1 / NOTIFY_BUCKET_REFILL_MS)
     fill_per_ms: f64,
     last_fill_ms: u64,
@@ -1481,9 +1598,13 @@ impl NotifyBucket {
     /// `capacity`    = NOTIFY_BUCKET_CAPACITY  (default 2 tokens)
     /// `refill_ms`   = NOTIFY_BUCKET_REFILL_MS (default 1500 ms per token)
     fn new(capacity: f64, refill_ms: f64) -> Self {
-        let fill_per_ms = if refill_ms > 0.0 { 1.0 / refill_ms } else { 1.0 };
+        let fill_per_ms = if refill_ms > 0.0 {
+            1.0 / refill_ms
+        } else {
+            1.0
+        };
         Self {
-            tokens:       capacity,   // start full: first `capacity` notifies go immediately
+            tokens: capacity, // start full: first `capacity` notifies go immediately
             capacity,
             fill_per_ms,
             last_fill_ms: 0,
@@ -1501,7 +1622,9 @@ impl NotifyBucket {
     /// Returns `true` if the notify should be sent.
     fn try_consume(&mut self) -> bool {
         let now = Self::now_ms();
-        if self.last_fill_ms == 0 { self.last_fill_ms = now; }
+        if self.last_fill_ms == 0 {
+            self.last_fill_ms = now;
+        }
         let elapsed_ms = now.saturating_sub(self.last_fill_ms) as f64;
         self.tokens = (self.tokens + elapsed_ms * self.fill_per_ms).min(self.capacity);
         self.last_fill_ms = now;
@@ -1552,10 +1675,10 @@ struct SessionState {
     /// and shares on them are accepted (without block submission).
     /// Set to now + STALE_GRACE_MS on every clean_jobs=true event.
     stale_grace_until_ms: u64,
-            /// How many round-trip proof entries have been logged for this session.
-            /// We log the first 200 accepted shares per session for version-rolling stats,
-            /// then stop to avoid flooding logs at scale.
-            proof_shares_logged: u16,
+    /// How many round-trip proof entries have been logged for this session.
+    /// We log the first 200 accepted shares per session for version-rolling stats,
+    /// then stop to avoid flooding logs at scale.
+    proof_shares_logged: u16,
     version_mask: u32,
     /// Duplicate share detection: (job_id, nonce, ntime, extranonce2_hex, version) tuple.
     /// extranonce2 is stored as a String so EXTRANONCE2_SIZE > 8 bytes never causes a
@@ -1592,14 +1715,8 @@ impl SessionState {
             difficulty: initial_diff,
             session_payout_script: None,
             session_payout_address: None,
-            share_target_cache: share_target_le(initial_diff)
-                .unwrap_or([0xFF; 32]),
-            vardiff: VardiffController::new(
-                target_share_time,
-                retarget_time,
-                min_diff,
-                max_diff,
-            ),
+            share_target_cache: share_target_le(initial_diff).unwrap_or([0xFF; 32]),
+            vardiff: VardiffController::new(target_share_time, retarget_time, min_diff, max_diff),
             vardiff_enabled,
             jobs: VecDeque::with_capacity(16),
             next_job_id: 1,
@@ -1639,21 +1756,29 @@ impl SessionState {
         }
     }
 
-    fn push_job(&mut self, job: Arc<JobTemplate>, difficulty: f64, extranonce1_bytes: &[u8], notify_ntime: Option<String>) -> Arc<SessionJob> {
+    fn set_difficulty(&mut self, difficulty: f64) {
+        if let Ok(target) = share_target_le(difficulty) {
+            self.share_target_cache = target;
+            self.difficulty = difficulty;
+        }
+    }
+
+    fn push_job(
+        &mut self,
+        job: Arc<JobTemplate>,
+        difficulty: f64,
+        extranonce1_bytes: &[u8],
+        notify_ntime: Option<String>,
+    ) -> Arc<SessionJob> {
         let session_job_id = format!("{:x}", self.next_job_id);
         self.next_job_id = self.next_job_id.wrapping_add(1).max(1);
 
-        // Update cached share target when difficulty changes.
-        if (difficulty - self.difficulty).abs() > f64::EPSILON {
-            if let Ok(t) = share_target_le(difficulty) {
-                self.share_target_cache = t;
-                self.difficulty = difficulty;
-            }
-        }
+        self.set_difficulty(difficulty);
         let share_target = self.share_target_cache;
 
         // Cache coinbase prefix per (session, job): coinbase1 + extranonce1.
-        let mut coinbase_prefix = Vec::with_capacity(job.coinbase1_bytes.len() + extranonce1_bytes.len());
+        let mut coinbase_prefix =
+            Vec::with_capacity(job.coinbase1_bytes.len() + extranonce1_bytes.len());
         coinbase_prefix.extend_from_slice(&job.coinbase1_bytes);
         coinbase_prefix.extend_from_slice(extranonce1_bytes);
 
@@ -1703,7 +1828,8 @@ impl SessionState {
             .unwrap_or_default()
             .as_millis() as u64;
         if now_ms >= self.stale_grace_until_ms {
-            self.jobs.retain(|j| !j.is_stale_block.load(Ordering::Relaxed));
+            self.jobs
+                .retain(|j| !j.is_stale_block.load(Ordering::Relaxed));
         }
 
         self.jobs.push_back(entry.clone());
@@ -1777,23 +1903,38 @@ fn build_notify_with_ntime(
         + job.version.len()
         + job.nbits.len()
         + ntime.len()
-        + job.merkle_branches.iter().map(|b| b.len() + 3).sum::<usize>();
+        + job
+            .merkle_branches
+            .iter()
+            .map(|b| b.len() + 3)
+            .sum::<usize>();
     let mut out = String::with_capacity(cap);
     // Trace of final output:
     // {"id":null,"method":"mining.notify","params":["job","prev","cb1","cb2",[branches],"ver","bits","ntime",true]}
     out.push_str(r#"{"id":null,"method":"mining.notify","params":[""#);
-    out.push_str(job_id);       out.push_str(r#"",""#);   // "job_id","
-    out.push_str(&job.prevhash);out.push_str(r#"",""#);   // "prevhash","
-    out.push_str(&job.coinbase1);out.push_str(r#"",""#);  // "coinbase1","
-    out.push_str(coinbase2);    out.push_str("\",[");     // "coinbase2",[
+    out.push_str(job_id);
+    out.push_str(r#"",""#); // "job_id","
+    out.push_str(&job.prevhash);
+    out.push_str(r#"",""#); // "prevhash","
+    out.push_str(&job.coinbase1);
+    out.push_str(r#"",""#); // "coinbase1","
+    out.push_str(coinbase2);
+    out.push_str("\",["); // "coinbase2",[
     for (i, branch) in job.merkle_branches.iter().enumerate() {
-        if i > 0 { out.push(','); }
-        out.push('"'); out.push_str(branch); out.push('"');
+        if i > 0 {
+            out.push(',');
+        }
+        out.push('"');
+        out.push_str(branch);
+        out.push('"');
     }
-    out.push_str("],\"");       // ],  "version"
-    out.push_str(&job.version); out.push_str("\",\"");    // "version","nbits"
-    out.push_str(&job.nbits);   out.push_str("\",\"");    // "nbits","ntime"
-    out.push_str(ntime);        out.push('"');             // "ntime"
+    out.push_str("],\""); // ],  "version"
+    out.push_str(&job.version);
+    out.push_str("\",\""); // "version","nbits"
+    out.push_str(&job.nbits);
+    out.push_str("\",\""); // "nbits","ntime"
+    out.push_str(ntime);
+    out.push('"'); // "ntime"
     out.push(',');
     out.push_str(if clean_jobs { "true]}" } else { "false]}" });
     out
@@ -1826,12 +1967,7 @@ fn header_merkle_root_hex(header_hex: &str) -> Option<String> {
 /// part of the worker identity.  This keeps BlockFinder compatible with UIs
 /// that bundle the pool URL into the same text field.
 fn canonicalize_authorize_worker(raw_worker: &str) -> &str {
-    raw_worker
-        .trim()
-        .split('@')
-        .next()
-        .unwrap_or("")
-        .trim()
+    raw_worker.trim().split('@').next().unwrap_or("").trim()
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
@@ -1852,7 +1988,8 @@ mod tests {
 
     #[test]
     fn test_canonicalize_authorize_worker_strips_pool_url_suffix() {
-        let raw = "bc1qp6d4vxmenug97ghcy027vsn3902yadcj77ka6j.brain@stratum+tcp://cloudpeakify.com:33333";
+        let raw =
+            "bc1qp6d4vxmenug97ghcy027vsn3902yadcj77ka6j.brain@stratum+tcp://cloudpeakify.com:33333";
         assert_eq!(
             canonicalize_authorize_worker(raw),
             "bc1qp6d4vxmenug97ghcy027vsn3902yadcj77ka6j.brain",
@@ -1866,6 +2003,35 @@ mod tests {
         assert_eq!(canonicalize_authorize_worker(raw), raw);
     }
 
+    #[test]
+    fn test_push_job_uses_requested_difficulty_target_even_if_state_was_preseeded() {
+        let mut state = SessionState::new(
+            "aabbccdd".to_string(),
+            vec![0xaa, 0xbb, 0xcc, 0xdd],
+            1_000.0,
+            15.0,
+            30.0,
+            1.0,
+            100_000_000.0,
+            true,
+            4.0,
+            1000.0,
+        );
+        let restored_diff = 50_000.0;
+
+        // Mirrors reconnect seeding: difficulty may already equal the restored
+        // value before the first job is pushed. The session job must still carry
+        // the matching target, not the bootstrap target.
+        state.difficulty = restored_diff;
+        let job = Arc::new(JobTemplate::empty());
+        let session_job = state.push_job(job, restored_diff, &[0xaa, 0xbb, 0xcc, 0xdd], None);
+
+        assert_eq!(
+            session_job.share_target_le,
+            share_target_le(restored_diff).unwrap()
+        );
+    }
+
     // ── 1) Duplicate correctness — normal config ──────────────────────────────
 
     /// Same share submitted twice → duplicate.
@@ -1875,7 +2041,10 @@ mod tests {
         let k2 = make_dup_key("1", "aabbccdd", "699f722b", "00000001", "20000000");
         let mut set: HashSet<DupKey> = HashSet::new();
         assert!(set.insert(k1));
-        assert!(!set.insert(k2), "identical share must be detected as duplicate");
+        assert!(
+            !set.insert(k2),
+            "identical share must be detected as duplicate"
+        );
     }
 
     /// Different nonce → not a duplicate.
@@ -1885,7 +2054,10 @@ mod tests {
         let k2 = make_dup_key("1", "aabbccee", "699f722b", "00000001", "20000000");
         let mut set: HashSet<DupKey> = HashSet::new();
         assert!(set.insert(k1));
-        assert!(set.insert(k2), "different nonce must not be flagged as duplicate");
+        assert!(
+            set.insert(k2),
+            "different nonce must not be flagged as duplicate"
+        );
     }
 
     /// Different ntime → not a duplicate.
@@ -1895,7 +2067,10 @@ mod tests {
         let k2 = make_dup_key("1", "aabbccdd", "699f722c", "00000001", "20000000");
         let mut set: HashSet<DupKey> = HashSet::new();
         assert!(set.insert(k1));
-        assert!(set.insert(k2), "different ntime must not be flagged as duplicate");
+        assert!(
+            set.insert(k2),
+            "different ntime must not be flagged as duplicate"
+        );
     }
 
     /// Different version bits (BIP310) → not a duplicate.
@@ -1905,7 +2080,10 @@ mod tests {
         let k2 = make_dup_key("1", "aabbccdd", "699f722b", "00000001", "203f4000");
         let mut set: HashSet<DupKey> = HashSet::new();
         assert!(set.insert(k1));
-        assert!(set.insert(k2), "different version bits must not be flagged as duplicate");
+        assert!(
+            set.insert(k2),
+            "different version bits must not be flagged as duplicate"
+        );
     }
 
     /// Different extranonce2 (normal 4-byte / 8-hex) → not a duplicate.
@@ -1915,7 +2093,10 @@ mod tests {
         let k2 = make_dup_key("1", "aabbccdd", "699f722b", "00000002", "20000000");
         let mut set: HashSet<DupKey> = HashSet::new();
         assert!(set.insert(k1));
-        assert!(set.insert(k2), "different extranonce2 must not be flagged as duplicate");
+        assert!(
+            set.insert(k2),
+            "different extranonce2 must not be flagged as duplicate"
+        );
     }
 
     // ── 2) Duplicate correctness — extended extranonce2 (> 8 bytes) ──────────
@@ -1947,7 +2128,10 @@ mod tests {
         let k2 = make_dup_key("1", "aabbccdd", "699f722b", en2, "20000000");
         let mut set: HashSet<DupKey> = HashSet::new();
         assert!(set.insert(k1));
-        assert!(!set.insert(k2), "same extended extranonce2 must still be detected as duplicate");
+        assert!(
+            !set.insert(k2),
+            "same extended extranonce2 must still be detected as duplicate"
+        );
     }
 
     /// The specific u64-overflow scenario: two values that differ only in bits
@@ -1980,9 +2164,9 @@ mod tests {
         // Simulate: miner submits two shares on the same job, same nonce/ntime,
         // but different extranonce2 values that are each 9 bytes (18 hex chars).
         // Under the old code both would collapse to 0 → second rejected as dup.
-        let en2_first  = "000000000000000000";  // 18 hex = 9 bytes
-        let en2_second = "000000000000000001";  // different → different hash
-        let k1 = make_dup_key("a", "deadbeef", "6abc1234", en2_first,  "20000000");
+        let en2_first = "000000000000000000"; // 18 hex = 9 bytes
+        let en2_second = "000000000000000001"; // different → different hash
+        let k1 = make_dup_key("a", "deadbeef", "6abc1234", en2_first, "20000000");
         let k2 = make_dup_key("a", "deadbeef", "6abc1234", en2_second, "20000000");
         let mut set: HashSet<DupKey> = HashSet::new();
         assert!(set.insert(k1), "first share must be accepted");
@@ -2007,17 +2191,17 @@ mod tests {
     #[test]
     fn test_share_record_stores_actual_share_difficulty_not_threshold() {
         use crate::storage::ShareRecord;
-        use uuid::Uuid;
         use chrono::Utc;
+        use uuid::Uuid;
 
-        let job_diff: f64   = 1024.0;   // session/job acceptance threshold
+        let job_diff: f64 = 1024.0; // session/job acceptance threshold
         let share_diff: f64 = 98_765.0; // actual DIFF1/hash for this share
 
         // After the fix: difficulty = share_diff.
         let record = ShareRecord {
             id: Uuid::new_v4(),
             worker: "test_worker".into(),
-            difficulty: share_diff,  // ← must be share_diff, not job_diff
+            difficulty: share_diff, // ← must be share_diff, not job_diff
             is_block: false,
             is_accepted: true,
             latency_ms: 10,
@@ -2044,8 +2228,14 @@ mod tests {
         let k3 = make_dup_key("3", "cafebabe", "5f0a1b2c", "deadc0df", "20000000");
         let mut set: HashSet<DupKey> = HashSet::new();
         assert!(set.insert(k1));
-        assert!(!set.insert(k2), "standard 4-byte en2: same share must be duplicate");
-        assert!(set.insert(k3), "standard 4-byte en2: different en2 must not be duplicate");
+        assert!(
+            !set.insert(k2),
+            "standard 4-byte en2: same share must be duplicate"
+        );
+        assert!(
+            set.insert(k3),
+            "standard 4-byte en2: different en2 must not be duplicate"
+        );
     }
 
     /// Different job_id with identical nonce/ntime/en2/version → not a duplicate.

@@ -35,11 +35,17 @@ fn proof_scenario1_arc_immutability_prevents_block_loss() {
     }
 
     // Step 1: share validation extracts a reference to the current job.
-    let original_job = Arc::new(FakeJob { is_stale_block: false, nonce_that_finds_block: 0xdeadbeef });
+    let original_job = Arc::new(FakeJob {
+        is_stale_block: false,
+        nonce_that_finds_block: 0xdeadbeef,
+    });
     let extracted = original_job.clone(); // simulates the clone in handle_submit
 
     // Step 2: template change fires — mark_jobs_stale_block creates a new Arc.
-    let replacement = Arc::new(FakeJob { is_stale_block: true, nonce_that_finds_block: original_job.nonce_that_finds_block });
+    let replacement = Arc::new(FakeJob {
+        is_stale_block: true,
+        nonce_that_finds_block: original_job.nonce_that_finds_block,
+    });
 
     // Step 3: validate_share runs with the extracted Arc (NOT the replacement).
     assert!(
@@ -135,8 +141,8 @@ fn proof_scenario2_longpoll_always_active_independent_of_zmq() {
     let longpoll_path_found_block = true;
     let dedup_key_after_first = "height=940661:..."; // opaque, set once
     let first_notified = zmq_path_found_block || longpoll_path_found_block;
-    let double_notified = zmq_path_found_block && longpoll_path_found_block
-        && dedup_key_after_first.len() > 0; // dedup prevents second broadcast
+    let double_notified =
+        zmq_path_found_block && longpoll_path_found_block && dedup_key_after_first.len() > 0; // dedup prevents second broadcast
 
     assert!(first_notified, "at least one path must detect the block");
     // double_notified is fine — dedup_key ensures only ONE job broadcast.
@@ -169,7 +175,8 @@ fn proof_scenario3_bitcoin_core_accepts_before_sqlite_write() {
         "total submitblock retry window must be exactly 7500ms (0+500+1000+2000+4000)"
     );
     assert_eq!(
-        submit_delays_ms.len(), 5,
+        submit_delays_ms.len(),
+        5,
         "must have exactly 5 submitblock attempts"
     );
 
@@ -178,7 +185,8 @@ fn proof_scenario3_bitcoin_core_accepts_before_sqlite_write() {
         assert!(
             w[1] >= w[0],
             "retry delays must be non-decreasing: {} < {}",
-            w[1], w[0]
+            w[1],
+            w[0]
         );
     }
 
@@ -208,10 +216,15 @@ fn proof_scenario3_bitcoin_core_accepts_before_sqlite_write() {
     // INVARIANT 4: getblockheader verification retries.
     let verify_delays_ms: &[u64] = &[300, 600, 1200, 2400, 4800];
     let verify_window_ms: u64 = verify_delays_ms.iter().sum();
-    assert_eq!(verify_window_ms, 9300,
-        "getblockheader verification window must be 9300ms");
-    assert_eq!(verify_delays_ms.len(), 5,
-        "must have 5 getblockheader attempts");
+    assert_eq!(
+        verify_window_ms, 9300,
+        "getblockheader verification window must be 9300ms"
+    );
+    assert_eq!(
+        verify_delays_ms.len(),
+        5,
+        "must have 5 getblockheader attempts"
+    );
 }
 
 // ─── Scenario 4 ───────────────────────────────────────────────────────────────
@@ -228,14 +241,19 @@ fn proof_scenario4_submitblock_retry_and_logging_contract() {
     let delays: &[u64] = &[0, 500, 1000, 2000, 4000];
 
     // INVARIANT 1: First attempt is immediate (delay=0).
-    assert_eq!(delays[0], 0, "first submitblock attempt must be immediate (no delay)");
+    assert_eq!(
+        delays[0], 0,
+        "first submitblock attempt must be immediate (no delay)"
+    );
 
     // INVARIANT 2: Total coverage = sum of delays before each attempt.
     // If bitcoind is down for T ms, we succeed if T < sum_of_delays.
     // sum = 0+500+1000+2000+4000 = 7500ms = 7.5 seconds total coverage.
     let total_ms: u64 = delays.iter().sum();
-    assert_eq!(total_ms, 7500,
-        "total retry coverage must be exactly 7500ms");
+    assert_eq!(
+        total_ms, 7500,
+        "total retry coverage must be exactly 7500ms"
+    );
 
     // INVARIANT 3: If all retries fail, the ERROR log includes "BLOCK MAY BE LOST"
     // and the full block_hex.  This is verified by reading the source:
@@ -285,8 +303,8 @@ fn proof_scenario4_submitblock_retry_and_logging_contract() {
 fn proof_scenario5_concurrent_block_submits_both_accepted() {
     // INVARIANT 1: "duplicate" is explicitly handled as accepted in template/mod.rs.
     let source = include_str!("../src/template/mod.rs");
-    let has_duplicate_handling = source.contains("duplicate")
-        && source.contains("inc_submitblock_accepted");
+    let has_duplicate_handling =
+        source.contains("duplicate") && source.contains("inc_submitblock_accepted");
     assert!(
         has_duplicate_handling,
         "INVARIANT VIOLATED: 'duplicate' response must map to inc_submitblock_accepted, \
@@ -307,14 +325,15 @@ fn proof_scenario5_concurrent_block_submits_both_accepted() {
     // 7.5 s during retry windows.
     let stratum_source = include_str!("../src/stratum/mod.rs");
     let calls_submit_block = stratum_source.contains("template_engine.submit_block")
-        || stratum_source.contains("engine.submit_block(");
+        || stratum_source.contains("engine.submit_block(")
+        || stratum_source.contains(".submit_block(");
     assert!(
         calls_submit_block,
         "stratum/mod.rs must call submit_block (via template_engine or cloned engine)"
     );
     // Verify the spawn pattern is present: block submission must not block the session.
     assert!(
-        stratum_source.contains("tokio::spawn") && stratum_source.contains("engine.submit_block("),
+        stratum_source.contains("tokio::spawn") && stratum_source.contains(".submit_block("),
         "block candidate submit_block must run inside tokio::spawn to avoid blocking the TCP session loop"
     );
 
@@ -324,11 +343,8 @@ fn proof_scenario5_concurrent_block_submits_both_accepted() {
     //
     // Net result: ONE block in the chain, TWO sessions see "accepted".
     // No block is lost regardless of which session submitted first.
-    let duplicate_counted_as_accepted = source.contains(
-        "\"duplicate\""
-    ) || source.contains(
-        "duplicate"
-    );
+    let duplicate_counted_as_accepted =
+        source.contains("\"duplicate\"") || source.contains("duplicate");
     assert!(
         duplicate_counted_as_accepted,
         "duplicate response from submitblock must be treated as accepted"
@@ -352,9 +368,7 @@ fn proof_duplicate_lru_eviction_keeps_recent_entries() {
     let mut submitted_hashes_order: VecDeque<DupKey> = VecDeque::new();
 
     // Helper: insert a key using the new LRU eviction strategy
-    let insert = |key: DupKey,
-                  hashes: &mut HashSet<DupKey>,
-                  order: &mut VecDeque<DupKey>| {
+    let insert = |key: DupKey, hashes: &mut HashSet<DupKey>, order: &mut VecDeque<DupKey>| {
         if hashes.len() >= MAX_DUP_HASHES {
             if let Some(oldest) = order.pop_front() {
                 hashes.remove(&oldest);
@@ -378,7 +392,11 @@ fn proof_duplicate_lru_eviction_keeps_recent_entries() {
     // Add one more — should evict k0 (oldest), not clear everything
     let k4: DupKey = (4, 14, 100, 0, 0);
     insert(k4, &mut submitted_hashes, &mut submitted_hashes_order);
-    assert_eq!(submitted_hashes.len(), 4, "size must stay at MAX_DUP_HASHES");
+    assert_eq!(
+        submitted_hashes.len(),
+        4,
+        "size must stay at MAX_DUP_HASHES"
+    );
     assert!(!submitted_hashes.contains(&k0), "oldest must be evicted");
     assert!(submitted_hashes.contains(&k1), "k1 must still be present");
     assert!(submitted_hashes.contains(&k2), "k2 must still be present");
@@ -386,11 +404,17 @@ fn proof_duplicate_lru_eviction_keeps_recent_entries() {
     assert!(submitted_hashes.contains(&k4), "newest must be present");
 
     // k1 is still in guard window — duplicate of k1 must be detected
-    assert!(submitted_hashes.contains(&k1), "k1 duplicate must still be blocked");
+    assert!(
+        submitted_hashes.contains(&k1),
+        "k1 duplicate must still be blocked"
+    );
 
     // k0 was evicted — submitting k0 again would NOT be caught (window expired)
     // This is expected and correct: k0 is old enough to be outside the guard window
-    assert!(!submitted_hashes.contains(&k0), "k0 is outside guard window after eviction");
+    assert!(
+        !submitted_hashes.contains(&k0),
+        "k0 is outside guard window after eviction"
+    );
 }
 
 #[test]
@@ -403,11 +427,11 @@ fn proof_duplicate_lru_does_not_clear_on_eviction() {
     let mut submitted_hashes: HashSet<DupKey> = HashSet::new();
     let mut submitted_hashes_order: VecDeque<DupKey> = VecDeque::new();
 
-    let insert = |key: DupKey,
-                  hashes: &mut HashSet<DupKey>,
-                  order: &mut VecDeque<DupKey>| {
+    let insert = |key: DupKey, hashes: &mut HashSet<DupKey>, order: &mut VecDeque<DupKey>| {
         if hashes.len() >= MAX_DUP_HASHES {
-            if let Some(oldest) = order.pop_front() { hashes.remove(&oldest); }
+            if let Some(oldest) = order.pop_front() {
+                hashes.remove(&oldest);
+            }
         }
         hashes.insert(key);
         order.push_back(key);
@@ -420,10 +444,14 @@ fn proof_duplicate_lru_does_not_clear_on_eviction() {
         // Size must never exceed MAX_DUP_HASHES
         assert!(
             submitted_hashes.len() <= MAX_DUP_HASHES,
-            "size {}>MAX at i={i}", submitted_hashes.len()
+            "size {}>MAX at i={i}",
+            submitted_hashes.len()
         );
         // Most recent entry must always be present
-        assert!(submitted_hashes.contains(&k), "newest key must always be present after insert");
+        assert!(
+            submitted_hashes.contains(&k),
+            "newest key must always be present after insert"
+        );
     }
     // After 7 inserts with MAX=4, the last 4 entries (3,4,5,6) should be present
     assert_eq!(submitted_hashes.len(), 4);

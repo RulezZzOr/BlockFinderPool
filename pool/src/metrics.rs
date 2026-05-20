@@ -205,8 +205,10 @@ impl CurrentBlockWindowState {
         if let Ok(mut block_hash) = self.block_hash.lock() {
             *block_hash = None;
         }
-        self.started_at_secs.store(scope.created_at.timestamp(), Ordering::Relaxed);
-        self.updated_at_secs.store(scope.created_at.timestamp(), Ordering::Relaxed);
+        self.started_at_secs
+            .store(scope.created_at.timestamp(), Ordering::Relaxed);
+        self.updated_at_secs
+            .store(scope.created_at.timestamp(), Ordering::Relaxed);
         if let Ok(mut template_key) = self.template_key.lock() {
             *template_key = scope.template_key.clone();
         }
@@ -237,7 +239,8 @@ impl CurrentBlockWindowState {
         if let Ok(mut prevhash) = self.prevhash.lock() {
             *prevhash = scope.prevhash.clone();
         }
-        self.updated_at_secs.store(scope.created_at.timestamp(), Ordering::Relaxed);
+        self.updated_at_secs
+            .store(scope.created_at.timestamp(), Ordering::Relaxed);
         if let Ok(mut template_key) = self.template_key.lock() {
             *template_key = scope.template_key.clone();
         }
@@ -248,7 +251,12 @@ impl CurrentBlockWindowState {
         self.tx_count.store(scope.tx_count, Ordering::Relaxed);
     }
 
-    fn update_best_submitted(&self, worker: &str, payout_address: Option<&str>, share_difficulty: f64) {
+    fn update_best_submitted(
+        &self,
+        worker: &str,
+        payout_address: Option<&str>,
+        share_difficulty: f64,
+    ) {
         if self.best_submitted_difficulty.fetch_max(share_difficulty) {
             if let Ok(mut best_meta) = self.best_meta.lock() {
                 best_meta.best_submitted_worker = Some(worker.to_string());
@@ -268,7 +276,10 @@ impl CurrentBlockWindowState {
     }
 
     fn update_best_candidate(&self, worker: &str, share_difficulty: f64) {
-        if self.best_block_candidate_difficulty.fetch_max(share_difficulty) {
+        if self
+            .best_block_candidate_difficulty
+            .fetch_max(share_difficulty)
+        {
             if let Ok(mut best_meta) = self.best_meta.lock() {
                 best_meta.best_candidate_worker = Some(worker.to_string());
             }
@@ -283,21 +294,17 @@ impl CurrentBlockWindowState {
         is_block: bool,
     ) {
         self.share_count.fetch_add(1, Ordering::Relaxed);
-        self.updated_at_secs.store(Utc::now().timestamp(), Ordering::Relaxed);
+        self.updated_at_secs
+            .store(Utc::now().timestamp(), Ordering::Relaxed);
         self.update_best_submitted(worker, payout_address, share_difficulty);
         if is_block {
             self.update_best_candidate(worker, share_difficulty);
         }
     }
 
-    fn record_result(
-        &self,
-        worker: &str,
-        share_difficulty: f64,
-        accepted: bool,
-        is_block: bool,
-    ) {
-        self.updated_at_secs.store(Utc::now().timestamp(), Ordering::Relaxed);
+    fn record_result(&self, worker: &str, share_difficulty: f64, accepted: bool, is_block: bool) {
+        self.updated_at_secs
+            .store(Utc::now().timestamp(), Ordering::Relaxed);
         if accepted {
             self.accepted_count.fetch_add(1, Ordering::Relaxed);
             self.update_best_accepted(worker, share_difficulty);
@@ -309,12 +316,14 @@ impl CurrentBlockWindowState {
 
     fn record_stale(&self) {
         self.stale_count.fetch_add(1, Ordering::Relaxed);
-        self.updated_at_secs.store(Utc::now().timestamp(), Ordering::Relaxed);
+        self.updated_at_secs
+            .store(Utc::now().timestamp(), Ordering::Relaxed);
     }
 
     fn record_duplicate(&self) {
         self.duplicate_count.fetch_add(1, Ordering::Relaxed);
-        self.updated_at_secs.store(Utc::now().timestamp(), Ordering::Relaxed);
+        self.updated_at_secs
+            .store(Utc::now().timestamp(), Ordering::Relaxed);
     }
 
     fn set_avg_pool_hashrate(&self, hashrate_gh: f64) {
@@ -327,11 +336,7 @@ impl CurrentBlockWindowState {
         }
     }
 
-    fn set_external_metadata(
-        &self,
-        external_pool: Option<String>,
-        fee_rate_sat_vb: Option<f64>,
-    ) {
+    fn set_external_metadata(&self, external_pool: Option<String>, fee_rate_sat_vb: Option<f64>) {
         if let Ok(mut value) = self.external_pool.lock() {
             *value = external_pool;
         }
@@ -354,29 +359,53 @@ impl CurrentBlockWindowState {
     ) -> BlockWindowSnapshot {
         let id = self.id.lock().ok().map(|v| v.clone()).unwrap_or_default();
         let height = self.height.load(Ordering::Relaxed);
-        let prevhash = self.prevhash.lock().ok().map(|v| v.clone()).unwrap_or_default();
+        let prevhash = self
+            .prevhash
+            .lock()
+            .ok()
+            .map(|v| v.clone())
+            .unwrap_or_default();
         let block_hash = self.block_hash.lock().ok().and_then(|v| v.clone());
         let started_at_secs = self.started_at_secs.load(Ordering::Relaxed);
-        let started_at = DateTime::<Utc>::from_timestamp(started_at_secs, 0).unwrap_or_else(Utc::now);
+        let started_at =
+            DateTime::<Utc>::from_timestamp(started_at_secs, 0).unwrap_or_else(Utc::now);
         let updated_at_secs = self.updated_at_secs.load(Ordering::Relaxed);
-        let updated_at = DateTime::<Utc>::from_timestamp(updated_at_secs, 0).unwrap_or_else(Utc::now);
+        let updated_at =
+            DateTime::<Utc>::from_timestamp(updated_at_secs, 0).unwrap_or_else(Utc::now);
         let ended_at = if in_progress {
             None
         } else {
             Some(ended_at_override.unwrap_or(updated_at))
         };
-        let duration_secs = ended_at
-            .map(|end| (end - started_at).num_seconds().max(0));
-        let template_key = self.template_key.lock().ok().map(|v| v.clone()).unwrap_or_default();
-        let job_id = self.job_id.lock().ok().map(|v| v.clone()).unwrap_or_default();
+        let duration_secs = ended_at.map(|end| (end - started_at).num_seconds().max(0));
+        let template_key = self
+            .template_key
+            .lock()
+            .ok()
+            .map(|v| v.clone())
+            .unwrap_or_default();
+        let job_id = self
+            .job_id
+            .lock()
+            .ok()
+            .map(|v| v.clone())
+            .unwrap_or_default();
         let external_pool = self.external_pool.lock().ok().and_then(|v| v.clone());
         let fee_rate_sat_vb = {
             let fee = self.fee_rate_sat_vb.load();
-            if fee > 0.0 { Some(fee) } else { None }
+            if fee > 0.0 {
+                Some(fee)
+            } else {
+                None
+            }
         };
         let avg_pool_hashrate = {
             let hr = self.avg_pool_hashrate.load();
-            if hr > 0.0 { Some(hr) } else { None }
+            if hr > 0.0 {
+                Some(hr)
+            } else {
+                None
+            }
         };
         let best_meta = self
             .best_meta
@@ -594,24 +623,32 @@ impl WorkerState {
         is_stale_block: bool,
     ) {
         self.difficulty.store(target_difficulty);
-        self.last_seen_secs.store(now.timestamp(), Ordering::Relaxed);
+        self.last_seen_secs
+            .store(now.timestamp(), Ordering::Relaxed);
 
         self.best_submitted_difficulty.fetch_max(share_difficulty);
-        self.worker_best_submitted_difficulty.fetch_max(share_difficulty);
-        self.session_best_submitted_difficulty.fetch_max(share_difficulty);
+        self.worker_best_submitted_difficulty
+            .fetch_max(share_difficulty);
+        self.session_best_submitted_difficulty
+            .fetch_max(share_difficulty);
         if is_block {
-            self.best_block_candidate_difficulty.fetch_max(share_difficulty);
+            self.best_block_candidate_difficulty
+                .fetch_max(share_difficulty);
         }
 
         if is_stale_block {
-            self.previous_block_best_submitted_difficulty.fetch_max(share_difficulty);
+            self.previous_block_best_submitted_difficulty
+                .fetch_max(share_difficulty);
             if is_block {
-                self.previous_block_best_candidate_difficulty.fetch_max(share_difficulty);
+                self.previous_block_best_candidate_difficulty
+                    .fetch_max(share_difficulty);
             }
         } else {
-            self.current_block_best_submitted_difficulty.fetch_max(share_difficulty);
+            self.current_block_best_submitted_difficulty
+                .fetch_max(share_difficulty);
             if is_block {
-                self.current_block_best_candidate_difficulty.fetch_max(share_difficulty);
+                self.current_block_best_candidate_difficulty
+                    .fetch_max(share_difficulty);
             }
         }
     }
@@ -628,26 +665,34 @@ impl WorkerState {
         is_stale_block: bool,
     ) {
         self.difficulty.store(target_difficulty);
-        self.last_seen_secs.store(now.timestamp(), Ordering::Relaxed);
-        self.notify_to_submit_ms.update_ema(notify_to_submit_ms as f64, 0.2);
+        self.last_seen_secs
+            .store(now.timestamp(), Ordering::Relaxed);
+        self.notify_to_submit_ms
+            .update_ema(notify_to_submit_ms as f64, 0.2);
         self.submit_rtt_ms.update_ema(submit_rtt_ms, 0.2);
 
         if accepted {
             self.shares.fetch_add(1, Ordering::Relaxed);
             self.best_difficulty.fetch_max(share_difficulty);
             self.best_accepted_difficulty.fetch_max(share_difficulty);
-            self.worker_best_accepted_difficulty.fetch_max(share_difficulty);
-            self.session_best_accepted_difficulty.fetch_max(share_difficulty);
+            self.worker_best_accepted_difficulty
+                .fetch_max(share_difficulty);
+            self.session_best_accepted_difficulty
+                .fetch_max(share_difficulty);
 
             if is_stale_block {
-                self.previous_block_best_accepted_difficulty.fetch_max(share_difficulty);
+                self.previous_block_best_accepted_difficulty
+                    .fetch_max(share_difficulty);
                 if is_block {
-                    self.previous_block_best_candidate_difficulty.fetch_max(share_difficulty);
+                    self.previous_block_best_candidate_difficulty
+                        .fetch_max(share_difficulty);
                 }
             } else {
-                self.current_block_best_accepted_difficulty.fetch_max(share_difficulty);
+                self.current_block_best_accepted_difficulty
+                    .fetch_max(share_difficulty);
                 if is_block {
-                    self.current_block_best_candidate_difficulty.fetch_max(share_difficulty);
+                    self.current_block_best_candidate_difficulty
+                        .fetch_max(share_difficulty);
                 }
             }
 
@@ -658,26 +703,31 @@ impl WorkerState {
                 });
                 if let Some(hashrate) = samples.hashrate_gh() {
                     self.hashrate_gh.store(hashrate);
-                    self.last_share_time_secs.store(now.timestamp(), Ordering::Relaxed);
+                    self.last_share_time_secs
+                        .store(now.timestamp(), Ordering::Relaxed);
                 }
             }
-            self.last_share_status_code.store(if is_block { 4 } else { 1 }, Ordering::Relaxed);
+            self.last_share_status_code
+                .store(if is_block { 4 } else { 1 }, Ordering::Relaxed);
         } else {
             self.rejected.fetch_add(1, Ordering::Relaxed);
             self.last_share_status_code.store(2, Ordering::Relaxed);
         }
         self.last_share_difficulty.store(share_difficulty);
         if !accepted {
-            self.last_share_time_secs.store(now.timestamp(), Ordering::Relaxed);
+            self.last_share_time_secs
+                .store(now.timestamp(), Ordering::Relaxed);
         }
     }
 
     fn mark_stale(&self, now: DateTime<Utc>) {
         self.stale.fetch_add(1, Ordering::Relaxed);
-        self.last_seen_secs.store(now.timestamp(), Ordering::Relaxed);
+        self.last_seen_secs
+            .store(now.timestamp(), Ordering::Relaxed);
         self.last_share_status_code.store(3, Ordering::Relaxed);
         self.last_share_difficulty.store(0.0);
-        self.last_share_time_secs.store(now.timestamp(), Ordering::Relaxed);
+        self.last_share_time_secs
+            .store(now.timestamp(), Ordering::Relaxed);
     }
 
     fn snapshot(&self, cutoff: DateTime<Utc>) -> Option<MinerStats> {
@@ -747,10 +797,14 @@ impl WorkerState {
             worker_best_accepted_difficulty: self.worker_best_accepted_difficulty.load(),
             current_block_best_submitted_difficulty: current_block_best_submitted,
             current_block_best_accepted_difficulty: current_block_best_accepted,
-            current_block_best_candidate_difficulty: self.current_block_best_candidate_difficulty.load(),
+            current_block_best_candidate_difficulty: self
+                .current_block_best_candidate_difficulty
+                .load(),
             previous_block_best_submitted_difficulty: previous_block_best_submitted,
             previous_block_best_accepted_difficulty: previous_block_best_accepted,
-            previous_block_best_candidate_difficulty: self.previous_block_best_candidate_difficulty.load(),
+            previous_block_best_candidate_difficulty: self
+                .previous_block_best_candidate_difficulty
+                .load(),
             last_share_status,
             last_share_difficulty: self.last_share_difficulty.load(),
             last_share_at,
@@ -815,57 +869,57 @@ pub enum StaleReason {
 #[derive(Default)]
 pub struct PoolCounters {
     /// Total mining.notify messages sent to all miners.
-    pub jobs_sent:              AtomicU64,
+    pub jobs_sent: AtomicU64,
     /// mining.notify with clean_jobs=true (new block detected).
-    pub clean_jobs_sent:        AtomicU64,
+    pub clean_jobs_sent: AtomicU64,
 
     // ── Notify suppression counters (three distinct reasons) ──────────────
     /// Suppressed because a different source already sent the SAME template_key
     /// (content-based dedup: ZMQ_TX + timer both fire for identical content).
-    pub notify_deduped:         AtomicU64,
+    pub notify_deduped: AtomicU64,
     /// Suppressed by per-session token bucket (clean_jobs=false).
-    pub notify_rate_limited:    AtomicU64,
+    pub notify_rate_limited: AtomicU64,
     /// Suppressed by post-block TX window (ZMQ hashtx fired within 15s of hashblock).
     /// Counter already exists as zmq_tx_suppressed — aliased here for API symmetry.
     // (zmq_tx_suppressed is the canonical field; this is not a separate counter)
 
     /// Duplicate share submissions rejected (same nonce+ntime+en2).
-    pub duplicate_shares:       AtomicU64,
+    pub duplicate_shares: AtomicU64,
     /// Total miner reconnections since pool start.
-    pub reconnects_total:       AtomicU64,
+    pub reconnects_total: AtomicU64,
     /// submitblock calls accepted by Bitcoin Core (null result = success).
-    pub submitblock_accepted:   AtomicU64,
+    pub submitblock_accepted: AtomicU64,
     /// submitblock calls that returned an error string from Bitcoin Core.
-    pub submitblock_rejected:   AtomicU64,
+    pub submitblock_rejected: AtomicU64,
     /// submitblock RPC calls that failed entirely (network/timeout).
-    pub submitblock_rpc_fail:   AtomicU64,
+    pub submitblock_rpc_fail: AtomicU64,
     /// Shares rejected because version bits outside the negotiated BIP310 mask
     /// were modified by the miner — indicates broken firmware.
     pub version_rolling_violations: AtomicU64,
     /// Stales caused by a new block clearing the job table.
-    pub stales_new_block:       AtomicU64,
+    pub stales_new_block: AtomicU64,
     /// Stales where the job was simply expired / unknown.
-    pub stales_expired:         AtomicU64,
+    pub stales_expired: AtomicU64,
     /// Stales on fresh sessions: miner reconnected and sent an old share.
-    pub stales_reconnect:       AtomicU64,
+    pub stales_reconnect: AtomicU64,
     /// ZMQ TX notifications suppressed by ZMQ_DEBOUNCE_MS (normal inter-tx debounce).
     /// High values are expected and healthy — Bitcoin mempool sends hundreds of
     /// hashtx/s; the debounce collapses them to at most 1 GBT refresh per 10s.
-    pub zmq_tx_debounced:            AtomicU64,
+    pub zmq_tx_debounced: AtomicU64,
     /// ZMQ TX notifications suppressed by the post-block 15s window.
     /// Fires only in the 15s after a hashblock ZMQ; separating it from
     /// zmq_tx_debounced lets operators confirm: burst IS correlated with a block.
     pub zmq_tx_post_block_suppressed: AtomicU64,
     /// ZMQ TX notifications that triggered a GBT refresh.
-    pub zmq_tx_triggered:            AtomicU64,
+    pub zmq_tx_triggered: AtomicU64,
     /// ZMQ block notifications received (raw count across ALL endpoints).
     /// With dual ZMQ (hashblock:28334 + rawblock:28332), this is typically
     /// 2× the number of actual blocks (each block fires one notification per port).
-    pub zmq_block_received:          AtomicU64,
+    pub zmq_block_received: AtomicU64,
     /// Unique blocks actually detected via ZMQ (after 10ms debounce).
     /// This equals the real number of new blocks seen via ZMQ — always 1 per block,
     /// regardless of how many ZMQ ports fired.
-    pub zmq_blocks_detected:         AtomicU64,
+    pub zmq_blocks_detected: AtomicU64,
     /// Wall-clock timestamp of the last clean_jobs=true mining.notify.
     pub last_clean_jobs_notify_at_ms: AtomicI64,
     /// Wall-clock timestamp in milliseconds of the first clean_jobs=true mining.notify
@@ -877,28 +931,64 @@ pub struct PoolCounters {
     /// Set to true once the Stratum TCP listener successfully binds and is ready
     /// to accept connections. Used by the /blackhole/connection-status endpoint
     /// instead of a hardcoded `true`.
-    pub stratum_ready:               std::sync::atomic::AtomicBool,
+    pub stratum_ready: std::sync::atomic::AtomicBool,
 }
 
 impl PoolCounters {
-    pub fn jobs_sent(&self)              -> u64 { self.jobs_sent.load(Ordering::Relaxed) }
-    pub fn clean_jobs_sent(&self)        -> u64 { self.clean_jobs_sent.load(Ordering::Relaxed) }
-    pub fn notify_deduped(&self)         -> u64 { self.notify_deduped.load(Ordering::Relaxed) }
-    pub fn notify_rate_limited(&self)    -> u64 { self.notify_rate_limited.load(Ordering::Relaxed) }
-    pub fn duplicate_shares(&self)       -> u64 { self.duplicate_shares.load(Ordering::Relaxed) }
-    pub fn reconnects_total(&self)       -> u64 { self.reconnects_total.load(Ordering::Relaxed) }
-    pub fn submitblock_accepted(&self)   -> u64 { self.submitblock_accepted.load(Ordering::Relaxed) }
-    pub fn submitblock_rejected(&self)   -> u64 { self.submitblock_rejected.load(Ordering::Relaxed) }
-    pub fn submitblock_rpc_fail(&self)   -> u64 { self.submitblock_rpc_fail.load(Ordering::Relaxed) }
-    pub fn version_rolling_violations(&self) -> u64 { self.version_rolling_violations.load(Ordering::Relaxed) }
-    pub fn stales_new_block(&self)       -> u64 { self.stales_new_block.load(Ordering::Relaxed) }
-    pub fn stales_expired(&self)         -> u64 { self.stales_expired.load(Ordering::Relaxed) }
-    pub fn stales_reconnect(&self)       -> u64 { self.stales_reconnect.load(Ordering::Relaxed) }
-    pub fn zmq_tx_debounced(&self)            -> u64 { self.zmq_tx_debounced.load(Ordering::Relaxed) }
-    pub fn zmq_tx_post_block_suppressed(&self) -> u64 { self.zmq_tx_post_block_suppressed.load(Ordering::Relaxed) }
-    pub fn zmq_tx_triggered(&self)            -> u64 { self.zmq_tx_triggered.load(Ordering::Relaxed) }
-    pub fn zmq_block_received(&self)          -> u64 { self.zmq_block_received.load(Ordering::Relaxed) }
-    pub fn zmq_blocks_detected(&self)         -> u64 { self.zmq_blocks_detected.load(Ordering::Relaxed) }
+    pub fn jobs_sent(&self) -> u64 {
+        self.jobs_sent.load(Ordering::Relaxed)
+    }
+    pub fn clean_jobs_sent(&self) -> u64 {
+        self.clean_jobs_sent.load(Ordering::Relaxed)
+    }
+    pub fn notify_deduped(&self) -> u64 {
+        self.notify_deduped.load(Ordering::Relaxed)
+    }
+    pub fn notify_rate_limited(&self) -> u64 {
+        self.notify_rate_limited.load(Ordering::Relaxed)
+    }
+    pub fn duplicate_shares(&self) -> u64 {
+        self.duplicate_shares.load(Ordering::Relaxed)
+    }
+    pub fn reconnects_total(&self) -> u64 {
+        self.reconnects_total.load(Ordering::Relaxed)
+    }
+    pub fn submitblock_accepted(&self) -> u64 {
+        self.submitblock_accepted.load(Ordering::Relaxed)
+    }
+    pub fn submitblock_rejected(&self) -> u64 {
+        self.submitblock_rejected.load(Ordering::Relaxed)
+    }
+    pub fn submitblock_rpc_fail(&self) -> u64 {
+        self.submitblock_rpc_fail.load(Ordering::Relaxed)
+    }
+    pub fn version_rolling_violations(&self) -> u64 {
+        self.version_rolling_violations.load(Ordering::Relaxed)
+    }
+    pub fn stales_new_block(&self) -> u64 {
+        self.stales_new_block.load(Ordering::Relaxed)
+    }
+    pub fn stales_expired(&self) -> u64 {
+        self.stales_expired.load(Ordering::Relaxed)
+    }
+    pub fn stales_reconnect(&self) -> u64 {
+        self.stales_reconnect.load(Ordering::Relaxed)
+    }
+    pub fn zmq_tx_debounced(&self) -> u64 {
+        self.zmq_tx_debounced.load(Ordering::Relaxed)
+    }
+    pub fn zmq_tx_post_block_suppressed(&self) -> u64 {
+        self.zmq_tx_post_block_suppressed.load(Ordering::Relaxed)
+    }
+    pub fn zmq_tx_triggered(&self) -> u64 {
+        self.zmq_tx_triggered.load(Ordering::Relaxed)
+    }
+    pub fn zmq_block_received(&self) -> u64 {
+        self.zmq_block_received.load(Ordering::Relaxed)
+    }
+    pub fn zmq_blocks_detected(&self) -> u64 {
+        self.zmq_blocks_detected.load(Ordering::Relaxed)
+    }
     pub fn last_clean_jobs_notify_at(&self) -> Option<DateTime<Utc>> {
         let ms = self.last_clean_jobs_notify_at_ms.load(Ordering::Relaxed);
         if ms <= 0 {
@@ -925,33 +1015,69 @@ impl PoolCounters {
 
     pub fn inc_jobs_sent(&self, clean: bool) {
         self.jobs_sent.fetch_add(1, Ordering::Relaxed);
-        if clean { self.clean_jobs_sent.fetch_add(1, Ordering::Relaxed); }
+        if clean {
+            self.clean_jobs_sent.fetch_add(1, Ordering::Relaxed);
+        }
     }
-    pub fn inc_notify_deduped(&self)      { self.notify_deduped.fetch_add(1, Ordering::Relaxed); }
-    pub fn inc_notify_rate_limited(&self) { self.notify_rate_limited.fetch_add(1, Ordering::Relaxed); }
-    pub fn inc_duplicate_share(&self) { self.duplicate_shares.fetch_add(1, Ordering::Relaxed); }
-    pub fn inc_reconnect(&self)       { self.reconnects_total.fetch_add(1, Ordering::Relaxed); }
-    pub fn inc_submitblock_accepted(&self) { self.submitblock_accepted.fetch_add(1, Ordering::Relaxed); }
-    pub fn inc_submitblock_rejected(&self) { self.submitblock_rejected.fetch_add(1, Ordering::Relaxed); }
-    pub fn inc_submitblock_rpc_fail(&self) { self.submitblock_rpc_fail.fetch_add(1, Ordering::Relaxed); }
-    pub fn inc_version_rolling_violation(&self) { self.version_rolling_violations.fetch_add(1, Ordering::Relaxed); }
+    pub fn inc_notify_deduped(&self) {
+        self.notify_deduped.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_notify_rate_limited(&self) {
+        self.notify_rate_limited.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_duplicate_share(&self) {
+        self.duplicate_shares.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_reconnect(&self) {
+        self.reconnects_total.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_submitblock_accepted(&self) {
+        self.submitblock_accepted.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_submitblock_rejected(&self) {
+        self.submitblock_rejected.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_submitblock_rpc_fail(&self) {
+        self.submitblock_rpc_fail.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_version_rolling_violation(&self) {
+        self.version_rolling_violations
+            .fetch_add(1, Ordering::Relaxed);
+    }
     pub fn inc_stale(&self, reason: StaleReason) {
         match reason {
-            StaleReason::NewBlock  => self.stales_new_block.fetch_add(1, Ordering::Relaxed),
-            StaleReason::Expired   => self.stales_expired.fetch_add(1, Ordering::Relaxed),
+            StaleReason::NewBlock => self.stales_new_block.fetch_add(1, Ordering::Relaxed),
+            StaleReason::Expired => self.stales_expired.fetch_add(1, Ordering::Relaxed),
             StaleReason::Reconnect => self.stales_reconnect.fetch_add(1, Ordering::Relaxed),
         };
     }
-    pub fn set_stratum_ready(&self) { self.stratum_ready.store(true, Ordering::Relaxed); }
-    pub fn is_stratum_ready(&self) -> bool { self.stratum_ready.load(Ordering::Relaxed) }
-    pub fn inc_zmq_tx_debounced(&self)            { self.zmq_tx_debounced.fetch_add(1, Ordering::Relaxed); }
-    pub fn inc_zmq_tx_post_block_suppressed(&self) { self.zmq_tx_post_block_suppressed.fetch_add(1, Ordering::Relaxed); }
-    pub fn inc_zmq_tx_triggered(&self)            { self.zmq_tx_triggered.fetch_add(1, Ordering::Relaxed); }
-    pub fn inc_zmq_block_received(&self)          { self.zmq_block_received.fetch_add(1, Ordering::Relaxed); }
-    pub fn inc_zmq_blocks_detected(&self)         { self.zmq_blocks_detected.fetch_add(1, Ordering::Relaxed); }
+    pub fn set_stratum_ready(&self) {
+        self.stratum_ready.store(true, Ordering::Relaxed);
+    }
+    pub fn is_stratum_ready(&self) -> bool {
+        self.stratum_ready.load(Ordering::Relaxed)
+    }
+    pub fn inc_zmq_tx_debounced(&self) {
+        self.zmq_tx_debounced.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_zmq_tx_post_block_suppressed(&self) {
+        self.zmq_tx_post_block_suppressed
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_zmq_tx_triggered(&self) {
+        self.zmq_tx_triggered.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_zmq_block_received(&self) {
+        self.zmq_block_received.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_zmq_blocks_detected(&self) {
+        self.zmq_blocks_detected.fetch_add(1, Ordering::Relaxed);
+    }
     pub fn reset_clean_jobs_notify_window(&self) {
-        self.first_clean_jobs_notify_at_ms.store(0, Ordering::Relaxed);
-        self.last_clean_jobs_notify_at_ms.store(0, Ordering::Relaxed);
+        self.first_clean_jobs_notify_at_ms
+            .store(0, Ordering::Relaxed);
+        self.last_clean_jobs_notify_at_ms
+            .store(0, Ordering::Relaxed);
     }
 
     pub fn reset_clean_jobs_template_window(&self) {
@@ -966,11 +1092,13 @@ impl PoolCounters {
             Ordering::Relaxed,
             Ordering::Relaxed,
         );
-        self.last_clean_jobs_notify_at_ms.store(timestamp, Ordering::Relaxed);
+        self.last_clean_jobs_notify_at_ms
+            .store(timestamp, Ordering::Relaxed);
     }
 
     pub fn note_clean_jobs_template(&self, now: DateTime<Utc>) {
-        self.clean_jobs_template_at_ms.store(now.timestamp_millis(), Ordering::Relaxed);
+        self.clean_jobs_template_at_ms
+            .store(now.timestamp_millis(), Ordering::Relaxed);
     }
 }
 
@@ -984,7 +1112,7 @@ struct MetricsState {
 
 #[derive(Clone)]
 pub struct MetricsStore {
-    inner:   Arc<RwLock<MetricsState>>,
+    inner: Arc<RwLock<MetricsState>>,
     workers: Arc<DashMap<String, Arc<WorkerState>>>,
     events: Arc<AsyncMutex<VecDeque<ShareEvent>>>,
     event_tx: mpsc::Sender<ShareEvent>,
@@ -1011,7 +1139,9 @@ pub struct MetricsStore {
 impl MetricsStore {
     pub fn new() -> Self {
         let (event_tx, mut event_rx) = mpsc::channel::<ShareEvent>(1024);
-        let events = Arc::new(AsyncMutex::new(VecDeque::with_capacity(SUBMIT_RTT_WINDOW_SIZE.max(MAX_EVENTS))));
+        let events = Arc::new(AsyncMutex::new(VecDeque::with_capacity(
+            SUBMIT_RTT_WINDOW_SIZE.max(MAX_EVENTS),
+        )));
         let events_worker = events.clone();
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
@@ -1025,8 +1155,8 @@ impl MetricsStore {
         });
 
         Self {
-            inner:      Arc::new(RwLock::new(MetricsState::default())),
-            workers:    Arc::new(DashMap::new()),
+            inner: Arc::new(RwLock::new(MetricsState::default())),
+            workers: Arc::new(DashMap::new()),
             events,
             event_tx,
             current_scope: Arc::new(RwLock::new(BlockScopeSnapshot {
@@ -1059,7 +1189,7 @@ impl MetricsStore {
             previous_block_best_submitted: Arc::new(AtomicF64::new(0.0)),
             previous_block_best_accepted: Arc::new(AtomicF64::new(0.0)),
             previous_block_best_candidate: Arc::new(AtomicF64::new(0.0)),
-            counters:   Arc::new(PoolCounters::default()),
+            counters: Arc::new(PoolCounters::default()),
             started_at: Utc::now(),
         }
     }
@@ -1078,9 +1208,14 @@ impl MetricsStore {
     /// This is used to seed reconnecting sessions so vardiff does not restart from the
     /// configured bootstrap difficulty on every reconnect.
     pub fn worker_last_difficulty(&self, worker: &str) -> Option<f64> {
-        self.workers
-            .get(worker)
-            .map(|entry| entry.value().difficulty.load())
+        let entry = self.workers.get(worker)?;
+        let state = entry.value();
+        let last_seen = state.last_seen_secs.load(Ordering::Relaxed);
+        let age = Utc::now().timestamp().saturating_sub(last_seen);
+        if last_seen <= 0 || age > MINER_INACTIVE_SECS {
+            return None;
+        }
+        Some(state.difficulty.load())
     }
 
     pub async fn set_template_scope(&self, job: &crate::template::JobTemplate) {
@@ -1101,16 +1236,21 @@ impl MetricsStore {
         if rotate {
             let previous = current.clone();
             *self.previous_scope.write().await = Some(previous);
-            self.previous_block_best_submitted.store(self.current_block_best_submitted.load());
-            self.previous_block_best_accepted.store(self.current_block_best_accepted.load());
-            self.previous_block_best_candidate.store(self.current_block_best_candidate.load());
+            self.previous_block_best_submitted
+                .store(self.current_block_best_submitted.load());
+            self.previous_block_best_accepted
+                .store(self.current_block_best_accepted.load());
+            self.previous_block_best_candidate
+                .store(self.current_block_best_candidate.load());
             self.counters.note_clean_jobs_template(new_scope.created_at);
 
             self.current_block_window
                 .set_block_hash(Some(new_scope.prevhash.clone()));
-            let finalized = self
-                .current_block_window
-                .snapshot_with_end(false, None, Some(new_scope.created_at));
+            let finalized = self.current_block_window.snapshot_with_end(
+                false,
+                None,
+                Some(new_scope.created_at),
+            );
             if let Ok(mut queue) = self.finalized_block_windows.lock() {
                 queue.push_back(finalized);
                 while queue.len() > 64 {
@@ -1148,7 +1288,13 @@ impl MetricsStore {
     ) {
         let now = Utc::now();
         let state = self.worker_state(worker, now, target_difficulty);
-        state.update_submit_seen(now, target_difficulty, share_difficulty, is_block, is_stale_block);
+        state.update_submit_seen(
+            now,
+            target_difficulty,
+            share_difficulty,
+            is_block,
+            is_stale_block,
+        );
 
         self.global_best_submitted.fetch_max(share_difficulty);
         if is_block {
@@ -1156,17 +1302,25 @@ impl MetricsStore {
         }
 
         if is_stale_block {
-            self.previous_block_best_submitted.fetch_max(share_difficulty);
+            self.previous_block_best_submitted
+                .fetch_max(share_difficulty);
             if is_block {
-                self.previous_block_best_candidate.fetch_max(share_difficulty);
+                self.previous_block_best_candidate
+                    .fetch_max(share_difficulty);
             }
         } else {
-            self.current_block_best_submitted.fetch_max(share_difficulty);
+            self.current_block_best_submitted
+                .fetch_max(share_difficulty);
             if is_block {
-                self.current_block_best_candidate.fetch_max(share_difficulty);
+                self.current_block_best_candidate
+                    .fetch_max(share_difficulty);
             }
-            self.current_block_window
-                .record_raw_share(worker, payout_address, share_difficulty, is_block);
+            self.current_block_window.record_raw_share(
+                worker,
+                payout_address,
+                share_difficulty,
+                is_block,
+            );
         }
     }
 
@@ -1200,17 +1354,24 @@ impl MetricsStore {
         if accepted {
             self.global_best_accepted.fetch_max(share_difficulty);
             if is_stale_block {
-                self.previous_block_best_accepted.fetch_max(share_difficulty);
+                self.previous_block_best_accepted
+                    .fetch_max(share_difficulty);
                 if is_block {
-                    self.previous_block_best_candidate.fetch_max(share_difficulty);
+                    self.previous_block_best_candidate
+                        .fetch_max(share_difficulty);
                 }
             } else {
                 self.current_block_best_accepted.fetch_max(share_difficulty);
                 if is_block {
-                    self.current_block_best_candidate.fetch_max(share_difficulty);
+                    self.current_block_best_candidate
+                        .fetch_max(share_difficulty);
                 }
-                self.current_block_window
-                    .record_result(worker, share_difficulty, accepted, is_block);
+                self.current_block_window.record_result(
+                    worker,
+                    share_difficulty,
+                    accepted,
+                    is_block,
+                );
             }
             if is_block {
                 self.total_blocks.fetch_add(1, Ordering::Relaxed);
@@ -1300,42 +1461,45 @@ impl MetricsStore {
         let mut new_best: Option<f64> = None;
 
         {
-            let stats = guard.miners.entry(worker.to_string()).or_insert_with(|| MinerStats {
-                worker: worker.to_string(),
-                difficulty: target_difficulty,
-                best_difficulty: 0.0,
-                best_submitted_difficulty: 0.0,
-                best_accepted_difficulty: 0.0,
-                best_block_candidate_difficulty: 0.0,
-                public_pool_style_best: 0.0,
-                cgminer_style_best: 0.0,
-                raw_best: 0.0,
-                accepted_best: 0.0,
-                session_best_submitted_difficulty: 0.0,
-                session_best_accepted_difficulty: 0.0,
-                worker_best_submitted_difficulty: 0.0,
-                worker_best_accepted_difficulty: 0.0,
-                current_block_best_submitted_difficulty: 0.0,
-                current_block_best_accepted_difficulty: 0.0,
-                current_block_best_candidate_difficulty: 0.0,
-                previous_block_best_submitted_difficulty: 0.0,
-                previous_block_best_accepted_difficulty: 0.0,
-                previous_block_best_candidate_difficulty: 0.0,
-                last_share_status: None,
-                last_share_difficulty: 0.0,
-                last_share_at: None,
-                shares: 0,
-                rejected: 0,
-                stale: 0,
-                hashrate_gh: 0.0,
-                last_seen: now,
-                notify_to_submit_ms: notify_to_submit_ms as f64,
-                submit_rtt_ms,
-                last_share_time: None,
-                user_agent: None,
-                session_id: None,
-                session_start: None,
-            });
+            let stats = guard
+                .miners
+                .entry(worker.to_string())
+                .or_insert_with(|| MinerStats {
+                    worker: worker.to_string(),
+                    difficulty: target_difficulty,
+                    best_difficulty: 0.0,
+                    best_submitted_difficulty: 0.0,
+                    best_accepted_difficulty: 0.0,
+                    best_block_candidate_difficulty: 0.0,
+                    public_pool_style_best: 0.0,
+                    cgminer_style_best: 0.0,
+                    raw_best: 0.0,
+                    accepted_best: 0.0,
+                    session_best_submitted_difficulty: 0.0,
+                    session_best_accepted_difficulty: 0.0,
+                    worker_best_submitted_difficulty: 0.0,
+                    worker_best_accepted_difficulty: 0.0,
+                    current_block_best_submitted_difficulty: 0.0,
+                    current_block_best_accepted_difficulty: 0.0,
+                    current_block_best_candidate_difficulty: 0.0,
+                    previous_block_best_submitted_difficulty: 0.0,
+                    previous_block_best_accepted_difficulty: 0.0,
+                    previous_block_best_candidate_difficulty: 0.0,
+                    last_share_status: None,
+                    last_share_difficulty: 0.0,
+                    last_share_at: None,
+                    shares: 0,
+                    rejected: 0,
+                    stale: 0,
+                    hashrate_gh: 0.0,
+                    last_seen: now,
+                    notify_to_submit_ms: notify_to_submit_ms as f64,
+                    submit_rtt_ms,
+                    last_share_time: None,
+                    user_agent: None,
+                    session_id: None,
+                    session_start: None,
+                });
 
             stats.difficulty = target_difficulty;
             stats.last_seen = now;
@@ -1353,7 +1517,8 @@ impl MetricsStore {
                     stats.best_difficulty = share_difficulty;
                     new_best = Some(share_difficulty);
                 }
-                stats.best_accepted_difficulty = stats.best_accepted_difficulty.max(share_difficulty);
+                stats.best_accepted_difficulty =
+                    stats.best_accepted_difficulty.max(share_difficulty);
                 stats.cgminer_style_best = stats.best_accepted_difficulty;
                 stats.accepted_best = stats.best_accepted_difficulty;
                 stats.last_share_status = Some(if is_block {
@@ -1367,8 +1532,9 @@ impl MetricsStore {
             }
 
             // EMA α=0.2 for both metrics — smooth over ~5 shares.
-            stats.notify_to_submit_ms = (stats.notify_to_submit_ms * 0.8) + (notify_to_submit_ms as f64 * 0.2);
-            stats.submit_rtt_ms       = (stats.submit_rtt_ms       * 0.8) + (submit_rtt_ms             * 0.2);
+            stats.notify_to_submit_ms =
+                (stats.notify_to_submit_ms * 0.8) + (notify_to_submit_ms as f64 * 0.2);
+            stats.submit_rtt_ms = (stats.submit_rtt_ms * 0.8) + (submit_rtt_ms * 0.2);
 
             if accepted {
                 if let Some(hashrate) = new_hashrate {
@@ -1415,12 +1581,19 @@ impl MetricsStore {
         state.best_difficulty.fetch_max(best_submitted);
         state.best_submitted_difficulty.fetch_max(best_submitted);
         state.best_accepted_difficulty.fetch_max(best_accepted);
-        state.best_block_candidate_difficulty.fetch_max(best_block_candidate);
-        state.worker_best_submitted_difficulty.fetch_max(best_submitted);
-        state.worker_best_accepted_difficulty.fetch_max(best_accepted);
+        state
+            .best_block_candidate_difficulty
+            .fetch_max(best_block_candidate);
+        state
+            .worker_best_submitted_difficulty
+            .fetch_max(best_submitted);
+        state
+            .worker_best_accepted_difficulty
+            .fetch_max(best_accepted);
         self.global_best_submitted.fetch_max(best_submitted);
         self.global_best_accepted.fetch_max(best_accepted);
-        self.global_best_block_candidate.fetch_max(best_block_candidate);
+        self.global_best_block_candidate
+            .fetch_max(best_block_candidate);
         state.last_seen_secs.store(0, Ordering::Relaxed);
         state.session_start_secs.store(0, Ordering::Relaxed);
         state.last_share_time_secs.store(0, Ordering::Relaxed);
@@ -1464,8 +1637,12 @@ impl MetricsStore {
         }
 
         state.difficulty.store(difficulty);
-        state.last_seen_secs.store(now.timestamp(), Ordering::Relaxed);
-        state.session_start_secs.store(now.timestamp(), Ordering::Relaxed);
+        state
+            .last_seen_secs
+            .store(now.timestamp(), Ordering::Relaxed);
+        state
+            .session_start_secs
+            .store(now.timestamp(), Ordering::Relaxed);
 
         if let Ok(mut meta) = state.meta.lock() {
             if user_agent.is_some() {
@@ -1485,7 +1662,8 @@ impl MetricsStore {
             .filter_map(|entry| entry.value().snapshot(cutoff))
             .collect::<Vec<_>>();
         let total_hashrate_gh = miners.iter().map(|m| m.hashrate_gh).sum();
-        self.current_block_window.set_avg_pool_hashrate(total_hashrate_gh);
+        self.current_block_window
+            .set_avg_pool_hashrate(total_hashrate_gh);
         let total_shares = miners.iter().map(|m| m.shares).sum();
         let total_rejected = miners.iter().map(|m| m.rejected).sum();
         let current_scope = self.current_scope.read().await.clone();
@@ -1612,9 +1790,7 @@ mod tests {
     }
 
     async fn visible_miner(metrics: &MetricsStore, worker: &str) {
-        metrics
-            .record_miner_seen(worker, 64.0, None, None)
-            .await;
+        metrics.record_miner_seen(worker, 64.0, None, None).await;
     }
 
     #[tokio::test]
@@ -1627,22 +1803,16 @@ mod tests {
             .await;
         metrics
             .record_share_result(
-                "worker-a",
-                64.0,
-                123.0,
-                false,
-                false,
-                10,
-                1.0,
-                0,
-                0,
-                false,
-                false,
+                "worker-a", 64.0, 123.0, false, false, 10, 1.0, 0, 0, false, false,
             )
             .await;
 
         let snapshot = metrics.snapshot().await;
-        let miner = snapshot.miners.iter().find(|m| m.worker == "worker-a").unwrap();
+        let miner = snapshot
+            .miners
+            .iter()
+            .find(|m| m.worker == "worker-a")
+            .unwrap();
         assert_eq!(miner.best_submitted_difficulty, 123.0);
         assert_eq!(miner.best_accepted_difficulty, 0.0);
         assert_eq!(snapshot.global_best_submitted_difficulty, 123.0);
@@ -1659,22 +1829,16 @@ mod tests {
             .await;
         metrics
             .record_share_result(
-                "worker-b",
-                128.0,
-                456.0,
-                true,
-                false,
-                12,
-                0.8,
-                1,
-                1,
-                false,
-                false,
+                "worker-b", 128.0, 456.0, true, false, 12, 0.8, 1, 1, false, false,
             )
             .await;
 
         let snapshot = metrics.snapshot().await;
-        let miner = snapshot.miners.iter().find(|m| m.worker == "worker-b").unwrap();
+        let miner = snapshot
+            .miners
+            .iter()
+            .find(|m| m.worker == "worker-b")
+            .unwrap();
         assert_eq!(miner.best_submitted_difficulty, 456.0);
         assert_eq!(miner.best_accepted_difficulty, 456.0);
         assert_eq!(snapshot.global_best_submitted_difficulty, 456.0);
@@ -1686,7 +1850,9 @@ mod tests {
         let metrics = MetricsStore::new();
         visible_miner(&metrics, "worker-block").await;
 
-        metrics.set_template_scope(&test_template(200, "ccc", "scope-block", "9")).await;
+        metrics
+            .set_template_scope(&test_template(200, "ccc", "scope-block", "9"))
+            .await;
         metrics
             .record_raw_share("worker-block", None, 512.0, 1_234.0, true, false)
             .await;
@@ -1707,7 +1873,11 @@ mod tests {
             .await;
 
         let snapshot = metrics.snapshot().await;
-        let miner = snapshot.miners.iter().find(|m| m.worker == "worker-block").unwrap();
+        let miner = snapshot
+            .miners
+            .iter()
+            .find(|m| m.worker == "worker-block")
+            .unwrap();
         assert_eq!(miner.best_block_candidate_difficulty, 1_234.0);
         assert_eq!(miner.current_block_best_candidate_difficulty, 1_234.0);
         assert_eq!(snapshot.global_best_block_candidate_difficulty, 1_234.0);
@@ -1724,17 +1894,7 @@ mod tests {
             .await;
         metrics
             .record_share_result(
-                "worker-c",
-                64.0,
-                99.0,
-                true,
-                false,
-                10,
-                1.0,
-                0,
-                0,
-                false,
-                false,
+                "worker-c", 64.0, 99.0, true, false, 10, 1.0, 0, 0, false, false,
             )
             .await;
 
@@ -1743,22 +1903,16 @@ mod tests {
             .await;
         metrics
             .record_share_result(
-                "worker-c",
-                64.0,
-                999.0,
-                false,
-                false,
-                11,
-                1.1,
-                0,
-                0,
-                false,
-                true,
+                "worker-c", 64.0, 999.0, false, false, 11, 1.1, 0, 0, false, true,
             )
             .await;
 
         let snapshot = metrics.snapshot().await;
-        let miner = snapshot.miners.iter().find(|m| m.worker == "worker-c").unwrap();
+        let miner = snapshot
+            .miners
+            .iter()
+            .find(|m| m.worker == "worker-c")
+            .unwrap();
         assert_eq!(miner.best_submitted_difficulty, 999.0);
         assert_eq!(miner.best_accepted_difficulty, 99.0);
     }
@@ -1768,27 +1922,21 @@ mod tests {
         let metrics = MetricsStore::new();
         visible_miner(&metrics, "worker-d").await;
 
-        metrics.set_template_scope(&test_template(100, "aaa", "scope-1", "1")).await;
+        metrics
+            .set_template_scope(&test_template(100, "aaa", "scope-1", "1"))
+            .await;
         metrics
             .record_raw_share("worker-d", None, 64.0, 77.0, false, false)
             .await;
         metrics
             .record_share_result(
-                "worker-d",
-                64.0,
-                77.0,
-                true,
-                false,
-                10,
-                1.0,
-                0,
-                0,
-                false,
-                false,
+                "worker-d", 64.0, 77.0, true, false, 10, 1.0, 0, 0, false, false,
             )
             .await;
 
-        metrics.set_template_scope(&test_template(101, "bbb", "scope-2", "2")).await;
+        metrics
+            .set_template_scope(&test_template(101, "bbb", "scope-2", "2"))
+            .await;
         let snapshot = metrics.snapshot().await;
         assert_eq!(snapshot.current_block_best_submitted_difficulty, 0.0);
         assert_eq!(snapshot.current_block_best_accepted_difficulty, 0.0);
@@ -1837,20 +1985,30 @@ mod tests {
         let mut first = test_template(600, "aaa", "scope-a", "1");
         first.created_at = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
         metrics.set_template_scope(&first).await;
-        assert_eq!(metrics.counters.clean_jobs_template_at().unwrap(), first.created_at);
+        assert_eq!(
+            metrics.counters.clean_jobs_template_at().unwrap(),
+            first.created_at
+        );
 
         let mut second = test_template(601, "bbb", "scope-b", "2");
         second.created_at = DateTime::<Utc>::from_timestamp(1_700_000_123, 0).unwrap();
         metrics.set_template_scope(&second).await;
-        assert_eq!(metrics.counters.clean_jobs_template_at().unwrap(), second.created_at);
+        assert_eq!(
+            metrics.counters.clean_jobs_template_at().unwrap(),
+            second.created_at
+        );
     }
 
     #[tokio::test]
     async fn persisted_best_round_trips_through_sqlite() {
         let metrics = MetricsStore::new();
         visible_miner(&metrics, "worker-e").await;
-        metrics.set_worker_best("worker-e", 123.0, 111.0, 99.0).await;
-        metrics.record_miner_seen("worker-e", 64.0, None, None).await;
+        metrics
+            .set_worker_best("worker-e", 123.0, 111.0, 99.0)
+            .await;
+        metrics
+            .record_miner_seen("worker-e", 64.0, None, None)
+            .await;
 
         let snapshot = metrics.snapshot().await;
         let sqlite = SqliteStore::connect(Some("sqlite::memory:")).await.unwrap();
@@ -1868,23 +2026,15 @@ mod tests {
         let metrics = MetricsStore::new();
         visible_miner(&metrics, "worker-f").await;
 
-        metrics.record_miner_seen("worker-f", 65_536.0, None, None).await;
+        metrics
+            .record_miner_seen("worker-f", 65_536.0, None, None)
+            .await;
         metrics
             .record_raw_share("worker-f", None, 65_536.0, 131_072.0, false, false)
             .await;
         metrics
             .record_share_result(
-                "worker-f",
-                65_536.0,
-                131_072.0,
-                true,
-                false,
-                9,
-                0.9,
-                0,
-                0,
-                false,
-                false,
+                "worker-f", 65_536.0, 131_072.0, true, false, 9, 0.9, 0, 0, false, false,
             )
             .await;
 
@@ -1892,13 +2042,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worker_last_difficulty_expires_after_inactive_window() {
+        let metrics = MetricsStore::new();
+        metrics
+            .record_miner_seen("worker-g", 131_072.0, None, None)
+            .await;
+        let state = metrics.workers.get("worker-g").unwrap().clone();
+        state.last_seen_secs.store(
+            (Utc::now() - Duration::seconds(MINER_INACTIVE_SECS + 1)).timestamp(),
+            Ordering::Relaxed,
+        );
+
+        assert_eq!(metrics.worker_last_difficulty("worker-g"), None);
+    }
+
+    #[tokio::test]
     async fn block_window_rotation_finalizes_previous_and_keeps_current_live() {
         let metrics = MetricsStore::new();
         visible_miner(&metrics, "worker-window").await;
 
-        metrics.set_template_scope(&test_template(300, "aaa", "scope-1", "1")).await;
         metrics
-            .record_raw_share("worker-window", Some("bc1qwindow"), 64.0, 50.0, false, false)
+            .set_template_scope(&test_template(300, "aaa", "scope-1", "1"))
+            .await;
+        metrics
+            .record_raw_share(
+                "worker-window",
+                Some("bc1qwindow"),
+                64.0,
+                50.0,
+                false,
+                false,
+            )
             .await;
         metrics
             .record_share_result(
@@ -1916,14 +2090,19 @@ mod tests {
             )
             .await;
 
-        metrics.set_template_scope(&test_template(301, "bbb", "scope-2", "2")).await;
+        metrics
+            .set_template_scope(&test_template(301, "bbb", "scope-2", "2"))
+            .await;
 
         let finalized = metrics.finalized_block_windows_snapshot().await;
         assert_eq!(finalized.len(), 1);
         assert_eq!(finalized[0].height, 300);
         assert_eq!(finalized[0].best_submitted_difficulty, 50.0);
         assert_eq!(finalized[0].best_worker.as_deref(), Some("worker-window"));
-        assert_eq!(finalized[0].best_payout_address.as_deref(), Some("bc1qwindow"));
+        assert_eq!(
+            finalized[0].best_payout_address.as_deref(),
+            Some("bc1qwindow")
+        );
         assert!(!finalized[0].in_progress);
 
         let current = metrics.current_block_window_snapshot(Some(3)).await;
@@ -1938,7 +2117,9 @@ mod tests {
         visible_miner(&metrics, "worker-low").await;
         visible_miner(&metrics, "worker-high").await;
 
-        metrics.set_template_scope(&test_template(400, "ccc", "scope-3", "3")).await;
+        metrics
+            .set_template_scope(&test_template(400, "ccc", "scope-3", "3"))
+            .await;
         metrics
             .record_raw_share("worker-low", Some("bc1qlow"), 64.0, 10.0, false, false)
             .await;
@@ -1962,9 +2143,18 @@ mod tests {
         let metrics = MetricsStore::new();
         visible_miner(&metrics, "worker-reject").await;
 
-        metrics.set_template_scope(&test_template(500, "ddd", "scope-4", "4")).await;
         metrics
-            .record_raw_share("worker-reject", Some("bc1qreject"), 64.0, 88.0, false, false)
+            .set_template_scope(&test_template(500, "ddd", "scope-4", "4"))
+            .await;
+        metrics
+            .record_raw_share(
+                "worker-reject",
+                Some("bc1qreject"),
+                64.0,
+                88.0,
+                false,
+                false,
+            )
             .await;
         metrics
             .record_share_result(

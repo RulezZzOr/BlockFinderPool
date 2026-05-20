@@ -1,5 +1,5 @@
-use std::collections::VecDeque;
 use chrono::{DateTime, Utc};
+use std::collections::VecDeque;
 
 // ─── Tuning constants ─────────────────────────────────────────────────────────
 //
@@ -51,9 +51,9 @@ const CACHE_SIZE: usize = 30;
 #[derive(Debug, Clone)]
 pub struct VardiffController {
     target_share_time: f64,
-    retarget_time:     f64,
-    min_diff:          f64,
-    max_diff:          f64,
+    retarget_time: f64,
+    min_diff: f64,
+    max_diff: f64,
     /// Time window used for share-rate estimation. Old shares are pruned so
     /// the controller can react to sustained slowdowns instead of waiting for
     /// an oversized historical burst to dominate the rate estimate.
@@ -77,27 +77,40 @@ pub struct VardiffController {
 }
 
 impl VardiffController {
-    pub fn new(
-        target_share_time: f64,
-        retarget_time:     f64,
-        min_diff:          f64,
-        max_diff:          f64,
-    ) -> Self {
+    pub fn new(target_share_time: f64, retarget_time: f64, min_diff: f64, max_diff: f64) -> Self {
         let now = Utc::now();
         let sample_window_secs = (target_share_time.max(1.0) * 4.0).clamp(180.0, 300.0);
         Self {
             target_share_time: target_share_time.max(1.0),
-            retarget_time:     retarget_time.max(1.0),
-            min_diff:          min_diff.max(1.0),
-            max_diff:          max_diff.max(min_diff),
+            retarget_time: retarget_time.max(1.0),
+            min_diff: min_diff.max(1.0),
+            max_diff: max_diff.max(min_diff),
             sample_window_secs,
-            last_retarget:     now,
-            session_start:     now,
-            ema_rate:          0.0,
-            ema_seeded:        false,
-            last_share_at:     None,
-            samples:           VecDeque::with_capacity(CACHE_SIZE),
+            last_retarget: now,
+            session_start: now,
+            ema_rate: 0.0,
+            ema_seeded: false,
+            last_share_at: None,
+            samples: VecDeque::with_capacity(CACHE_SIZE),
         }
+    }
+
+    pub fn is_compatible(
+        &self,
+        target_share_time: f64,
+        retarget_time: f64,
+        min_diff: f64,
+        max_diff: f64,
+    ) -> bool {
+        let target_share_time = target_share_time.max(1.0);
+        let retarget_time = retarget_time.max(1.0);
+        let min_diff = min_diff.max(1.0);
+        let max_diff = max_diff.max(min_diff);
+
+        (self.target_share_time - target_share_time).abs() <= f64::EPSILON
+            && (self.retarget_time - retarget_time).abs() <= f64::EPSILON
+            && (self.min_diff - min_diff).abs() <= f64::EPSILON
+            && (self.max_diff - max_diff).abs() <= f64::EPSILON
     }
 
     /// Record an accepted share.
@@ -114,7 +127,9 @@ impl VardiffController {
     pub fn maybe_retarget(&mut self, current_diff: f64, now: DateTime<Utc>) -> Option<f64> {
         // Enforce minimum cadence.
         let since_ms = (now - self.last_retarget).num_milliseconds();
-        if since_ms < (self.retarget_time * 1000.0) as i64 { return None; }
+        if since_ms < (self.retarget_time * 1000.0) as i64 {
+            return None;
+        }
         self.last_retarget = now;
         self.prune_old_samples(now);
 
@@ -132,22 +147,25 @@ impl VardiffController {
         }
 
         // ── Instant rate from sliding window ─────────────────────────────────
-        let sum  = self.samples.iter().map(|(_, d)| *d).sum::<f64>();
+        let sum = self.samples.iter().map(|(_, d)| *d).sum::<f64>();
         let span = (self.samples.back().unwrap().0 - self.samples.front().unwrap().0)
-                       .num_milliseconds() as f64 / 1000.0;
-        if span <= 0.0 { return None; }
+            .num_milliseconds() as f64
+            / 1000.0;
+        if span <= 0.0 {
+            return None;
+        }
         let instant_rate = sum / span;
 
         // ── EMA update ────────────────────────────────────────────────────────
         if self.ema_seeded {
             self.ema_rate = EMA_ALPHA * instant_rate + (1.0 - EMA_ALPHA) * self.ema_rate;
         } else {
-            self.ema_rate  = instant_rate; // seed on first measurement
+            self.ema_rate = instant_rate; // seed on first measurement
             self.ema_seeded = true;
         }
 
         // ── Target difficulty ─────────────────────────────────────────────────
-        let raw_target  = self.ema_rate * self.target_share_time;
+        let raw_target = self.ema_rate * self.target_share_time;
         let target_diff = self.clamp_diff(raw_target);
 
         // ── Hysteresis dead-band ──────────────────────────────────────────────
@@ -155,7 +173,7 @@ impl VardiffController {
         // Retarget DOWN if target ≤ current / HYSTERESIS_DOWN
         // Asymmetric on purpose: let fast miners climb a bit more slowly,
         // but let slow miners come down quickly.
-        let should_up   = target_diff >= current_diff * HYSTERESIS_UP;
+        let should_up = target_diff >= current_diff * HYSTERESIS_UP;
         let should_down = target_diff <= current_diff / HYSTERESIS_DOWN;
 
         if should_up || should_down {
@@ -171,7 +189,9 @@ impl VardiffController {
     /// powers of two.  Matching that behaviour lets the pool move down
     /// smoothly instead of getting stuck on coarse buckets like 131072 / 262144.
     pub fn clamp_diff(&self, val: f64) -> f64 {
-        if !val.is_finite() || val <= 0.0 { return self.min_diff; }
+        if !val.is_finite() || val <= 0.0 {
+            return self.min_diff;
+        }
         val.round().clamp(self.min_diff, self.max_diff)
     }
 
@@ -295,7 +315,9 @@ mod tests {
         // With diff=262144: rate = same
         let rate_high_diff = rate;
 
-        assert!((rate_low_diff - rate_high_diff).abs() < f64::EPSILON,
-                "difficulty does not affect rate of best_diff growth");
+        assert!(
+            (rate_low_diff - rate_high_diff).abs() < f64::EPSILON,
+            "difficulty does not affect rate of best_diff growth"
+        );
     }
 }
