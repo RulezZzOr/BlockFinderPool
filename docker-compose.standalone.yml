@@ -25,6 +25,47 @@ services:
     volumes:
       - pool_data:/data
 
+  blackhole-pool-rental:
+    build:
+      context: ./pool
+      args:
+        BUILD_GIT_SHA: ${BUILD_GIT_SHA:-unknown}
+        BUILD_GIT_DIRTY: ${BUILD_GIT_DIRTY:-unknown}
+        BUILD_SOURCE: ${BUILD_SOURCE:-docker-compose}
+        BUILD_TIME_UTC: ${BUILD_TIME_UTC:-unknown}
+        BUILD_IMAGE_ID: ${BUILD_IMAGE_ID:-unknown}
+    env_file: ./env/.env
+    environment:
+      RUNTIME_IMAGE_REF: ${RENTAL_RUNTIME_IMAGE_REF:-blackhole-blackhole-pool-rental:latest}
+      RUNTIME_IMAGE_ID: ${RENTAL_RUNTIME_IMAGE_ID:-unknown}
+      RUNTIME_CONTAINER_NAME: ${RENTAL_RUNTIME_CONTAINER_NAME:-blackhole-blackhole-pool-rental-1}
+      STRATUM_PORT: ${RENTAL_STRATUM_PORT:-4444}
+      API_ENABLED: ${RENTAL_API_ENABLED:-false}
+      API_PORT: ${RENTAL_API_PORT:-8081}
+      VARDIFF_ENABLED: ${RENTAL_VARDIFF_ENABLED:-false}
+      TARGET_SHARE_TIME_SECS: ${RENTAL_TARGET_SHARE_TIME_SECS:-15}
+      VARDIFF_RETARGET_SECS: ${RENTAL_VARDIFF_RETARGET_SECS:-30}
+      MIN_DIFFICULTY: ${RENTAL_MIN_DIFFICULTY:-524288}
+      MAX_DIFFICULTY: ${RENTAL_MAX_DIFFICULTY:-524288}
+      STRATUM_START_DIFFICULTY: ${RENTAL_STRATUM_START_DIFFICULTY:-524288}
+      FIXED_DIFF_WORKERS: ${RENTAL_FIXED_DIFF_WORKERS:-}
+      PERSIST_SHARES: ${RENTAL_PERSIST_SHARES:-false}
+      PERSIST_BLOCKS: ${RENTAL_PERSIST_BLOCKS:-false}
+      PERSIST_BEST: ${RENTAL_PERSIST_BEST:-false}
+      DATABASE_URL: ${RENTAL_DATABASE_URL:-}
+      REDIS_URL: ${RENTAL_REDIS_URL:-}
+    cpuset: "2-3"
+    network_mode: host
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q ':115C ' /proc/net/tcp || grep -q ':115C ' /proc/net/tcp6"]
+      interval: 30s
+      timeout: 3s
+      retries: 6
+      start_period: 240s
+    volumes:
+      - pool_rental_data:/data
+
   blackhole-dashboard:
     build:
       context: ./dashboard
@@ -36,3 +77,5 @@ services:
 volumes:
   pool_data:
     name: blackhole_pool_data
+  pool_rental_data:
+    name: blackhole_pool_rental_data
