@@ -106,6 +106,24 @@ docker compose -f docker-compose.solo.yml up -d --build
 docker compose -f docker-compose.solo.yml --profile dashboard up -d --build
 ```
 
+**CPU pinning for a 4-core host:**
+```bash
+export POOL_CPUSET=2-3
+docker compose -f docker-compose.solo.yml up -d --build
+```
+
+If your Bitcoin Core runs as a container, pin it to the first two cores:
+```bash
+docker update --cpuset-cpus="0,1" bitcoind
+```
+
+If Bitcoin Core runs as a native system service, pin it with `taskset`:
+```bash
+taskset -cp 0,1 $(pidof bitcoind)
+```
+
+This keeps Bitcoin Core on `0-1` and BlockFinder on `2-3`, which is usually the cleanest split for a 4-thread box.
+
 ### 4. Check logs
 
 ```bash

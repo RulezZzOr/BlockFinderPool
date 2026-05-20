@@ -13,6 +13,7 @@ services:
       RUNTIME_IMAGE_REF: ${RUNTIME_IMAGE_REF:-blackhole-blackhole-pool:latest}
       RUNTIME_IMAGE_ID: ${RUNTIME_IMAGE_ID:-unknown}
       RUNTIME_CONTAINER_NAME: ${RUNTIME_CONTAINER_NAME:-blackhole-blackhole-pool-1}
+    cpuset: "2-3"
     network_mode: host
     restart: unless-stopped
     healthcheck:

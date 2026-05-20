@@ -9,6 +9,7 @@ import BlocksTable from "./components/BlocksTable";
 import BlockCandidatesTable from "./components/BlockCandidatesTable";
 import BlockWindowsTable from "./components/BlockWindowsTable";
 import PublicBlocksTable from "./components/PublicBlocksTable";
+import HashrateChart from "./components/HashrateChart";
 import "./styles.css";
 
 const REFRESH_MS = 1000;
@@ -881,6 +882,23 @@ function MiningHealthPanel({
         <span>RPC {health.rpcHealthy ? "healthy" : "down"}</span>
         <span>ZMQ {health.zmqConnected ? "connected" : "down"}</span>
         <span>Last clean jobs {pool.lastCleanJobsNotifyAt ? timeAgo(pool.lastCleanJobsNotifyAt) : "—"}</span>
+        <span
+          title={[
+            pool.cleanJobsTemplateAt ? `tpl=${timeAgo(pool.cleanJobsTemplateAt)}` : null,
+            pool.cleanJobsFirstNotifyAt ? `first=${timeAgo(pool.cleanJobsFirstNotifyAt)}` : null,
+            pool.cleanJobsLastNotifyAt ? `last=${timeAgo(pool.cleanJobsLastNotifyAt)}` : null,
+          ].filter(Boolean).join(" · ") || "—"}
+        >
+          Block pipeline {
+            [
+              pool.blockToTemplateMs != null ? `blk→tpl ${fmtMs(pool.blockToTemplateMs)}` : null,
+              pool.templateToFirstNotifyMs != null ? `tpl→first ${fmtMs(pool.templateToFirstNotifyMs)}` : null,
+              pool.templateToLastNotifyMs != null ? `tpl→last ${fmtMs(pool.templateToLastNotifyMs)}` : null,
+              pool.blockToFirstNotifyMs != null ? `blk→first ${fmtMs(pool.blockToFirstNotifyMs)}` : null,
+              pool.blockToLastNotifyMs != null ? `blk→last ${fmtMs(pool.blockToLastNotifyMs)}` : null,
+            ].filter(Boolean).join(" · ") || "—"
+          }
+        </span>
         <span>Runtime {fmtUptime(health.runtimeSecs)}</span>
       </div>
 
@@ -1545,6 +1563,12 @@ export default function App() {
         <div className="bh-section-line" />
       </div>
       <MiningHealthPanel pool={pool} miners={miners} hashrate={hashrate} />
+
+      <div className="bh-section-title" id="bh-histogram">
+        <span>Share Histogram</span>
+        <div className="bh-section-line" />
+      </div>
+      <HashrateChart data={hashrate?.recent ?? []} />
 
       {/* Miner Fleet */}
       <div className="bh-section-title" id="bh-fleet">

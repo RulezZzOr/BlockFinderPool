@@ -244,7 +244,11 @@ impl TemplateEngine {
 
     pub fn last_template_refresh_at(&self) -> Option<DateTime<Utc>> {
         let secs = self.last_template_refresh_ms.load(Ordering::Relaxed);
-        DateTime::<Utc>::from_timestamp(secs, 0)
+        if secs <= 0 {
+            None
+        } else {
+            DateTime::<Utc>::from_timestamp(secs, 0)
+        }
     }
 
     pub fn template_refresh_failures(&self) -> u64 {
@@ -309,6 +313,8 @@ impl TemplateEngine {
         // Arm the TX suppression window so the post-block mempool burst is batched.
         let suppress_ms = self.config.post_block_suppress_ms;
         self.post_block_suppress_until_ms.store(now + suppress_ms, Ordering::Relaxed);
+        self.counters.reset_clean_jobs_notify_window();
+        self.counters.reset_clean_jobs_template_window();
         true
     }
 

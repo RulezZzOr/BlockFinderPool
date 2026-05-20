@@ -1207,6 +1207,41 @@ body::before {
   background: var(--red);
 }
 
+.bh-histogram-card {
+  margin-bottom: 16px;
+  padding-bottom: 18px;
+}
+
+.bh-histogram-subtitle {
+  margin-top: -6px;
+  margin-bottom: 12px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text3);
+  letter-spacing: .04em;
+}
+
+.bh-histogram-badge {
+  margin-left: auto;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .08em;
+  color: var(--cyan);
+  background: var(--cyan-lo);
+  border: 1px solid rgba(34,211,238,.18);
+  white-space: nowrap;
+}
+
+.bh-histogram-card .recharts-wrapper {
+  overflow: visible;
+}
+
+.bh-histogram-card .recharts-tooltip-wrapper {
+  pointer-events: none;
+}
+
 @media (max-width: 960px) {
   .bh-health-grid,
   .bh-health-metrics {

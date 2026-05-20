@@ -178,6 +178,7 @@ impl StratumServer {
                 //  - clean_jobs=false consumes a token; empty bucket → skip notify
                 //  - authorized check still gates all work
                 let notify = {
+                    let now = Utc::now();
                     let mut guard = notify_state.lock().await;
 
                     if !guard.authorized {
@@ -200,13 +201,13 @@ impl StratumServer {
                         // Mark existing jobs stale in-place (AtomicBool, no Arc recreation).
                         // Grace window stays active for STALE_GRACE_MS after this point.
                         guard.mark_jobs_stale_block();
-                        guard.last_clean_jobs_time = Some(Utc::now());
-                        notify_counters.set_last_clean_jobs_notify_at(Utc::now());
+                        guard.last_clean_jobs_time = Some(now);
+                        notify_counters.note_clean_jobs_notify(now);
                     }
                     let diff = guard.difficulty;
                     let extranonce1_bytes = guard.extranonce1_bytes.clone();
                     let session_job = guard.push_job(job.clone(), diff, &extranonce1_bytes, None);
-                    guard.last_notify = Utc::now();
+                    guard.last_notify = now;
                     guard.last_prevhash = Some(job.prevhash_le.clone());
 
                     notify_counters.inc_jobs_sent(clean_jobs);
@@ -467,6 +468,13 @@ impl StratumServer {
                     let _ = tx.send(response.to_string()).await;
 
                     if authorized {
+                        let restored_difficulty = self
+                            .metrics
+                            .worker_last_difficulty(&worker)
+                            .filter(|value| value.is_finite() && *value > 0.0)
+                            .unwrap_or(self.config.start_difficulty)
+                            .clamp(self.config.min_difficulty, self.config.max_difficulty);
+
                         // Update session state quickly, but don't await while holding the lock.
                         let (difficulty, user_agent, session_id, extranonce1, diff_msg, notify_opt) = {
                             let mut guard = state.lock().await;
@@ -474,6 +482,7 @@ impl StratumServer {
                             guard.worker = worker.clone();
                             guard.session_payout_script = payout_script;
                             guard.session_payout_address = payout_address_str.clone();
+                            guard.difficulty = restored_difficulty;
 
                             let difficulty = guard.difficulty;
                             let user_agent = guard.user_agent.clone();
@@ -656,7 +665,10 @@ impl StratumServer {
 
     async fn handle_authorize(&self, request: &StratumRequest) -> (String, bool, Option<Vec<u8>>, Option<String>) {
         let params = request.params.as_array().cloned().unwrap_or_default();
-        let worker = params.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let worker = canonicalize_authorize_worker(
+            params.get(0).and_then(|v| v.as_str()).unwrap_or(""),
+        )
+        .to_string();
         let password = params.get(1).and_then(|v| v.as_str()).unwrap_or("");
 
         let authorized = if let Some(token) = &self.config.auth_token {
@@ -667,7 +679,9 @@ impl StratumServer {
 
         // Try to extract a Bitcoin address from the worker name.
         // Miners commonly use: "address.worker_name" or just "address".
-        // We try the full string first, then the part before the first '.'.
+        // Some UIs append the pool URL to the username in the form
+        // "address.worker_name@stratum+tcp://host:port". We strip the `@...`
+        // suffix first, then try the full left-hand side and the bare address.
         let (payout_script, payout_address_str) = if authorized {
             let candidates = {
                 let mut v = vec![worker.as_str()];
@@ -1802,6 +1816,24 @@ fn header_merkle_root_hex(header_hex: &str) -> Option<String> {
     Some(hex::encode(&bytes[36..68]))
 }
 
+/// Normalize a Stratum `mining.authorize` username.
+///
+/// Accepts both:
+/// - `bc1...worker`
+/// - `bc1...worker@stratum+tcp://host:port`
+///
+/// and returns only the identity part before `@`, because the pool URL is not
+/// part of the worker identity.  This keeps BlockFinder compatible with UIs
+/// that bundle the pool URL into the same text field.
+fn canonicalize_authorize_worker(raw_worker: &str) -> &str {
+    raw_worker
+        .trim()
+        .split('@')
+        .next()
+        .unwrap_or("")
+        .trim()
+}
+
 // ─── Unit tests ───────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod tests {
@@ -1816,6 +1848,22 @@ mod tests {
             en2.to_string(),
             u32::from_str_radix(version, 16).unwrap_or(0),
         )
+    }
+
+    #[test]
+    fn test_canonicalize_authorize_worker_strips_pool_url_suffix() {
+        let raw = "bc1qp6d4vxmenug97ghcy027vsn3902yadcj77ka6j.brain@stratum+tcp://cloudpeakify.com:33333";
+        assert_eq!(
+            canonicalize_authorize_worker(raw),
+            "bc1qp6d4vxmenug97ghcy027vsn3902yadcj77ka6j.brain",
+            "authorize usernames must ignore the appended pool URL suffix"
+        );
+    }
+
+    #[test]
+    fn test_canonicalize_authorize_worker_keeps_plain_username() {
+        let raw = "bc1qp6d4vxmenug97ghcy027vsn3902yadcj77ka6j.brain";
+        assert_eq!(canonicalize_authorize_worker(raw), raw);
     }
 
     // ── 1) Duplicate correctness — normal config ──────────────────────────────

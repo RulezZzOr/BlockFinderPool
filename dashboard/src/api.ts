@@ -49,7 +49,7 @@ export type PoolStats = {
   previousBlockBestAcceptedDifficulty: number;
   previousBlockBestCandidateDifficulty: number;
   templateMaxAgeSecs: number;
-  lastTemplateRefreshAt: string;
+  lastTemplateRefreshAt: string | null;
   lastZmqBlockAt: string | null;
   lastZmqTxAt: string | null;
   currentTemplateAgeSecs: number | null;
@@ -57,6 +57,14 @@ export type PoolStats = {
   templateStale: boolean;
   zmqConnected: boolean;
   lastCleanJobsNotifyAt: string | null;
+  cleanJobsFirstNotifyAt: string | null;
+  cleanJobsLastNotifyAt: string | null;
+  cleanJobsTemplateAt: string | null;
+  blockToTemplateMs: number | null;
+  templateToFirstNotifyMs: number | null;
+  templateToLastNotifyMs: number | null;
+  blockToFirstNotifyMs: number | null;
+  blockToLastNotifyMs: number | null;
   templateRefreshFailures: number;
   rpcHealthy: boolean;
   currentBlockHeight: number;

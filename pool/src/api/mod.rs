@@ -347,8 +347,16 @@ async fn cached_block_rows(state: &ApiState) -> Vec<BlockRow> {
 }
 
 async fn refresh_block_rows_cache(state: &ApiState) -> Vec<BlockRow> {
-    let rows = fetch_block_rows(state).await;
+    let fetched = fetch_block_rows(state).await;
     let mut cache = state.blocks_cache.write().await;
+    let rows = if fetched.is_empty() {
+        cache
+            .as_ref()
+            .map(|cached| cached.rows.clone())
+            .unwrap_or_default()
+    } else {
+        fetched
+    };
     *cache = Some(CachedBlockRows {
         rows: rows.clone(),
         fetched_at: Instant::now(),
@@ -424,11 +432,19 @@ async fn refresh_persisted_block_windows_cache(
     state: &ApiState,
     persisted_limit: i64,
 ) -> Vec<SqlBlockWindowRow> {
-    let rows = match state.sqlite.fetch_block_windows(persisted_limit).await {
+    let fetched = match state.sqlite.fetch_block_windows(persisted_limit).await {
         Ok(rows) => rows,
         Err(_) => vec![],
     };
     let mut cache = state.persisted_block_windows_cache.write().await;
+    let rows = if fetched.is_empty() {
+        cache
+            .as_ref()
+            .map(|cached| cached.rows.clone())
+            .unwrap_or_default()
+    } else {
+        fetched
+    };
     *cache = Some(CachedPersistedBlockWindows {
         rows: rows.clone(),
         limit: persisted_limit,
@@ -571,8 +587,16 @@ async fn cached_block_candidate_rows(state: &ApiState) -> Vec<BlockCandidateRow>
 }
 
 async fn refresh_block_candidate_rows_cache(state: &ApiState) -> Vec<BlockCandidateRow> {
-    let rows = fetch_block_candidate_rows(state).await;
+    let fetched = fetch_block_candidate_rows(state).await;
     let mut cache = state.block_candidates_cache.write().await;
+    let rows = if fetched.is_empty() {
+        cache
+            .as_ref()
+            .map(|cached| cached.rows.clone())
+            .unwrap_or_default()
+    } else {
+        fetched
+    };
     *cache = Some(CachedBlockCandidateRows {
         rows: rows.clone(),
         fetched_at: Instant::now(),
@@ -774,7 +798,7 @@ struct PoolInfo {
     previousBlockBestAcceptedDifficulty: f64,
     previousBlockBestCandidateDifficulty: f64,
     templateMaxAgeSecs: u64,
-    lastTemplateRefreshAt: String,
+    lastTemplateRefreshAt: Option<String>,
     lastZmqBlockAt: Option<String>,
     lastZmqTxAt: Option<String>,
     currentTemplateAgeSecs: Option<u64>,
@@ -782,6 +806,14 @@ struct PoolInfo {
     templateStale: bool,
     zmqConnected: bool,
     lastCleanJobsNotifyAt: Option<String>,
+    cleanJobsFirstNotifyAt: Option<String>,
+    cleanJobsLastNotifyAt: Option<String>,
+    cleanJobsTemplateAt: Option<String>,
+    blockToTemplateMs: Option<u64>,
+    templateToFirstNotifyMs: Option<u64>,
+    templateToLastNotifyMs: Option<u64>,
+    blockToFirstNotifyMs: Option<u64>,
+    blockToLastNotifyMs: Option<u64>,
     templateRefreshFailures: u64,
     rpcHealthy: bool,
     currentBlockHeight: u64,
@@ -874,6 +906,41 @@ fn build_pool_info_from_snapshot(
     let miners_count = total_miners.max(1) as f64;
     let jobs_sent_per_miner = c.jobs_sent() as f64 / miners_count;
     let jobs_sent_per_miner_per_min = jobs_sent_per_miner / uptime_min;
+    let last_block_at = state.template_engine.last_zmq_block_trigger_at();
+    let clean_jobs_template_at = state.metrics.counters.clean_jobs_template_at();
+    let clean_jobs_first_notify_at = state.metrics.counters.first_clean_jobs_notify_at();
+    let clean_jobs_last_notify_at = state.metrics.counters.last_clean_jobs_notify_at();
+
+    let block_to_template_ms = match (last_block_at, clean_jobs_template_at) {
+        (Some(block_at), Some(template_at)) => Some(
+            (template_at - block_at).num_milliseconds().max(0) as u64,
+        ),
+        _ => None,
+    };
+    let template_to_first_notify_ms = match (clean_jobs_template_at, clean_jobs_first_notify_at) {
+        (Some(template_at), Some(first_notify_at)) => Some(
+            (first_notify_at - template_at).num_milliseconds().max(0) as u64,
+        ),
+        _ => None,
+    };
+    let template_to_last_notify_ms = match (clean_jobs_template_at, clean_jobs_last_notify_at) {
+        (Some(template_at), Some(last_notify_at)) => Some(
+            (last_notify_at - template_at).num_milliseconds().max(0) as u64,
+        ),
+        _ => None,
+    };
+    let block_to_first_notify_ms = match (last_block_at, clean_jobs_first_notify_at) {
+        (Some(block_at), Some(first_notify_at)) => Some(
+            (first_notify_at - block_at).num_milliseconds().max(0) as u64,
+        ),
+        _ => None,
+    };
+    let block_to_last_notify_ms = match (last_block_at, clean_jobs_last_notify_at) {
+        (Some(block_at), Some(last_notify_at)) => Some(
+            (last_notify_at - block_at).num_milliseconds().max(0) as u64,
+        ),
+        _ => None,
+    };
 
     PoolInfo {
         totalHashRate: total_hashrate,
@@ -927,8 +994,7 @@ fn build_pool_info_from_snapshot(
         lastTemplateRefreshAt: state
             .template_engine
             .last_template_refresh_at()
-            .unwrap_or(snapshot.current_scope.created_at)
-            .to_rfc3339(),
+            .map(|dt| dt.to_rfc3339()),
         lastZmqBlockAt: state.template_engine.last_zmq_block_trigger_at().map(|dt| dt.to_rfc3339()),
         lastZmqTxAt: state.template_engine.last_zmq_tx_trigger_at().map(|dt| dt.to_rfc3339()),
         currentTemplateAgeSecs: state.template_engine.template_age_secs(),
@@ -940,6 +1006,14 @@ fn build_pool_info_from_snapshot(
             .unwrap_or(true),
         zmqConnected: state.template_engine.zmq_connected(),
         lastCleanJobsNotifyAt: state.metrics.counters.last_clean_jobs_notify_at().map(|dt| dt.to_rfc3339()),
+        cleanJobsFirstNotifyAt: clean_jobs_first_notify_at.map(|dt| dt.to_rfc3339()),
+        cleanJobsLastNotifyAt: clean_jobs_last_notify_at.map(|dt| dt.to_rfc3339()),
+        cleanJobsTemplateAt: clean_jobs_template_at.map(|dt| dt.to_rfc3339()),
+        blockToTemplateMs: block_to_template_ms,
+        templateToFirstNotifyMs: template_to_first_notify_ms,
+        templateToLastNotifyMs: template_to_last_notify_ms,
+        blockToFirstNotifyMs: block_to_first_notify_ms,
+        blockToLastNotifyMs: block_to_last_notify_ms,
         templateRefreshFailures: state.template_engine.template_refresh_failures(),
         rpcHealthy: state.template_engine.rpc_healthy(),
         currentBlockHeight: snapshot.current_scope.height,
@@ -1387,7 +1461,7 @@ mod tests {
             previousBlockBestAcceptedDifficulty: 5.0,
             previousBlockBestCandidateDifficulty: 4.0,
             templateMaxAgeSecs: 30,
-            lastTemplateRefreshAt: "2026-04-22T00:00:00Z".to_string(),
+            lastTemplateRefreshAt: None,
             lastZmqBlockAt: None,
             lastZmqTxAt: None,
             currentTemplateAgeSecs: Some(1),
@@ -1395,6 +1469,14 @@ mod tests {
             templateStale: false,
             zmqConnected: true,
             lastCleanJobsNotifyAt: None,
+            cleanJobsFirstNotifyAt: None,
+            cleanJobsLastNotifyAt: None,
+            cleanJobsTemplateAt: None,
+            blockToTemplateMs: None,
+            templateToFirstNotifyMs: None,
+            templateToLastNotifyMs: None,
+            blockToFirstNotifyMs: None,
+            blockToLastNotifyMs: None,
             templateRefreshFailures: 0,
             rpcHealthy: true,
             currentBlockHeight: 123,
@@ -1676,8 +1758,9 @@ async fn cached_mining_info(state: &ApiState) -> Option<MiningInfo> {
 }
 
 async fn refresh_mining_info_cache(state: &ApiState) -> Option<MiningInfo> {
-    let value = fetch_mining_info(&state.rpc).await.ok();
+    let fetched = fetch_mining_info(&state.rpc).await.ok();
     let mut cache = state.mining_info_cache.write().await;
+    let value = fetched.or_else(|| cache.as_ref().and_then(|cached| cached.value.clone()));
     *cache = Some(CachedMiningInfo {
         value: value.clone(),
         fetched_at: Instant::now(),

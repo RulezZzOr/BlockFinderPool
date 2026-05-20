@@ -687,7 +687,11 @@ impl WorkerState {
             return None;
         }
         let session_start_secs = self.session_start_secs.load(Ordering::Relaxed);
-        let session_start = DateTime::<Utc>::from_timestamp(session_start_secs, 0);
+        let session_start = if session_start_secs > 0 {
+            DateTime::<Utc>::from_timestamp(session_start_secs, 0)
+        } else {
+            None
+        };
         let last_share_secs = self.last_share_time_secs.load(Ordering::Relaxed);
         let last_share_time = if last_share_secs > 0 {
             DateTime::<Utc>::from_timestamp(last_share_secs, 0)
@@ -863,7 +867,13 @@ pub struct PoolCounters {
     /// regardless of how many ZMQ ports fired.
     pub zmq_blocks_detected:         AtomicU64,
     /// Wall-clock timestamp of the last clean_jobs=true mining.notify.
-    pub last_clean_jobs_notify_at_secs: AtomicI64,
+    pub last_clean_jobs_notify_at_ms: AtomicI64,
+    /// Wall-clock timestamp in milliseconds of the first clean_jobs=true mining.notify
+    /// after the most recent block event.
+    pub first_clean_jobs_notify_at_ms: AtomicI64,
+    /// Wall-clock timestamp in milliseconds when the most recent clean_jobs template
+    /// was installed.
+    pub clean_jobs_template_at_ms: AtomicI64,
     /// Set to true once the Stratum TCP listener successfully binds and is ready
     /// to accept connections. Used by the /blackhole/connection-status endpoint
     /// instead of a hardcoded `true`.
@@ -890,11 +900,27 @@ impl PoolCounters {
     pub fn zmq_block_received(&self)          -> u64 { self.zmq_block_received.load(Ordering::Relaxed) }
     pub fn zmq_blocks_detected(&self)         -> u64 { self.zmq_blocks_detected.load(Ordering::Relaxed) }
     pub fn last_clean_jobs_notify_at(&self) -> Option<DateTime<Utc>> {
-        let secs = self.last_clean_jobs_notify_at_secs.load(Ordering::Relaxed);
-        if secs <= 0 {
+        let ms = self.last_clean_jobs_notify_at_ms.load(Ordering::Relaxed);
+        if ms <= 0 {
             return None;
         }
-        DateTime::<Utc>::from_timestamp(secs, 0)
+        DateTime::<Utc>::from_timestamp_millis(ms)
+    }
+
+    pub fn first_clean_jobs_notify_at(&self) -> Option<DateTime<Utc>> {
+        let ms = self.first_clean_jobs_notify_at_ms.load(Ordering::Relaxed);
+        if ms <= 0 {
+            return None;
+        }
+        DateTime::<Utc>::from_timestamp_millis(ms)
+    }
+
+    pub fn clean_jobs_template_at(&self) -> Option<DateTime<Utc>> {
+        let ms = self.clean_jobs_template_at_ms.load(Ordering::Relaxed);
+        if ms <= 0 {
+            return None;
+        }
+        DateTime::<Utc>::from_timestamp_millis(ms)
     }
 
     pub fn inc_jobs_sent(&self, clean: bool) {
@@ -923,8 +949,28 @@ impl PoolCounters {
     pub fn inc_zmq_tx_triggered(&self)            { self.zmq_tx_triggered.fetch_add(1, Ordering::Relaxed); }
     pub fn inc_zmq_block_received(&self)          { self.zmq_block_received.fetch_add(1, Ordering::Relaxed); }
     pub fn inc_zmq_blocks_detected(&self)         { self.zmq_blocks_detected.fetch_add(1, Ordering::Relaxed); }
-    pub fn set_last_clean_jobs_notify_at(&self, now: DateTime<Utc>) {
-        self.last_clean_jobs_notify_at_secs.store(now.timestamp(), Ordering::Relaxed);
+    pub fn reset_clean_jobs_notify_window(&self) {
+        self.first_clean_jobs_notify_at_ms.store(0, Ordering::Relaxed);
+        self.last_clean_jobs_notify_at_ms.store(0, Ordering::Relaxed);
+    }
+
+    pub fn reset_clean_jobs_template_window(&self) {
+        self.clean_jobs_template_at_ms.store(0, Ordering::Relaxed);
+    }
+
+    pub fn note_clean_jobs_notify(&self, now: DateTime<Utc>) {
+        let timestamp = now.timestamp_millis();
+        let _ = self.first_clean_jobs_notify_at_ms.compare_exchange(
+            0,
+            timestamp,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+        self.last_clean_jobs_notify_at_ms.store(timestamp, Ordering::Relaxed);
+    }
+
+    pub fn note_clean_jobs_template(&self, now: DateTime<Utc>) {
+        self.clean_jobs_template_at_ms.store(now.timestamp_millis(), Ordering::Relaxed);
     }
 }
 
@@ -1028,6 +1074,15 @@ impl MetricsStore {
         }
     }
 
+    /// Return the last known target difficulty for a worker, if we have seen it before.
+    /// This is used to seed reconnecting sessions so vardiff does not restart from the
+    /// configured bootstrap difficulty on every reconnect.
+    pub fn worker_last_difficulty(&self, worker: &str) -> Option<f64> {
+        self.workers
+            .get(worker)
+            .map(|entry| entry.value().difficulty.load())
+    }
+
     pub async fn set_template_scope(&self, job: &crate::template::JobTemplate) {
         let new_scope = BlockScopeSnapshot {
             height: job.height,
@@ -1049,6 +1104,7 @@ impl MetricsStore {
             self.previous_block_best_submitted.store(self.current_block_best_submitted.load());
             self.previous_block_best_accepted.store(self.current_block_best_accepted.load());
             self.previous_block_best_candidate.store(self.current_block_best_candidate.load());
+            self.counters.note_clean_jobs_template(new_scope.created_at);
 
             self.current_block_window
                 .set_block_hash(Some(new_scope.prevhash.clone()));
@@ -1072,6 +1128,7 @@ impl MetricsStore {
 
             self.current_block_window.reset_for_scope(&new_scope);
         } else if current.height == 0 {
+            self.counters.note_clean_jobs_template(new_scope.created_at);
             self.current_block_window.reset_for_scope(&new_scope);
         } else {
             self.current_block_window.update_template(&new_scope);
@@ -1742,6 +1799,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clean_jobs_notify_window_tracks_first_and_last_notify_after_reset() {
+        let metrics = MetricsStore::new();
+        let now = Utc::now();
+
+        metrics.counters.note_clean_jobs_notify(now);
+        assert!(metrics.counters.first_clean_jobs_notify_at().is_some());
+        assert!(metrics.counters.last_clean_jobs_notify_at().is_some());
+
+        metrics.counters.reset_clean_jobs_notify_window();
+        assert!(metrics.counters.first_clean_jobs_notify_at().is_none());
+        assert!(metrics.counters.last_clean_jobs_notify_at().is_none());
+
+        metrics.counters.note_clean_jobs_notify(now);
+        let first = metrics.counters.first_clean_jobs_notify_at().unwrap();
+        let last = metrics.counters.last_clean_jobs_notify_at().unwrap();
+        let expected = DateTime::<Utc>::from_timestamp_millis(now.timestamp_millis()).unwrap();
+        assert_eq!(first, expected);
+        assert_eq!(last, expected);
+    }
+
+    #[tokio::test]
+    async fn clean_jobs_template_window_resets_on_new_block() {
+        let metrics = MetricsStore::new();
+        let now = Utc::now();
+
+        metrics.counters.note_clean_jobs_template(now);
+        assert!(metrics.counters.clean_jobs_template_at().is_some());
+
+        metrics.counters.reset_clean_jobs_template_window();
+        assert!(metrics.counters.clean_jobs_template_at().is_none());
+    }
+
+    #[tokio::test]
+    async fn template_scope_rotation_tracks_clean_jobs_template_timestamp() {
+        let metrics = MetricsStore::new();
+        let mut first = test_template(600, "aaa", "scope-a", "1");
+        first.created_at = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        metrics.set_template_scope(&first).await;
+        assert_eq!(metrics.counters.clean_jobs_template_at().unwrap(), first.created_at);
+
+        let mut second = test_template(601, "bbb", "scope-b", "2");
+        second.created_at = DateTime::<Utc>::from_timestamp(1_700_000_123, 0).unwrap();
+        metrics.set_template_scope(&second).await;
+        assert_eq!(metrics.counters.clean_jobs_template_at().unwrap(), second.created_at);
+    }
+
+    #[tokio::test]
     async fn persisted_best_round_trips_through_sqlite() {
         let metrics = MetricsStore::new();
         visible_miner(&metrics, "worker-e").await;
@@ -1757,6 +1861,34 @@ mod tests {
         assert_eq!(submitted, 123.0);
         assert_eq!(accepted, 111.0);
         assert_eq!(candidate, 99.0);
+    }
+
+    #[tokio::test]
+    async fn worker_last_difficulty_persists_across_sessions() {
+        let metrics = MetricsStore::new();
+        visible_miner(&metrics, "worker-f").await;
+
+        metrics.record_miner_seen("worker-f", 65_536.0, None, None).await;
+        metrics
+            .record_raw_share("worker-f", None, 65_536.0, 131_072.0, false, false)
+            .await;
+        metrics
+            .record_share_result(
+                "worker-f",
+                65_536.0,
+                131_072.0,
+                true,
+                false,
+                9,
+                0.9,
+                0,
+                0,
+                false,
+                false,
+            )
+            .await;
+
+        assert_eq!(metrics.worker_last_difficulty("worker-f"), Some(65_536.0));
     }
 
     #[tokio::test]
