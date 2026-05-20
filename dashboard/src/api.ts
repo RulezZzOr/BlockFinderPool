@@ -193,6 +193,21 @@ export type PublicBlockRow = {
   pool: string | null;
 };
 
+export type ShareSizeHistogramBucket = {
+  lowerBoundDifficulty: number;
+  upperBoundDifficulty: number;
+  label: string;
+  count: number;
+};
+
+export type ShareSizeHistogramResponse = {
+  days: number;
+  source: "accepted" | "submitted";
+  sampleCount: number;
+  maxDifficulty: number;
+  buckets: ShareSizeHistogramBucket[];
+};
+
 export type DashboardSnapshot = {
   pool: PoolStats;
   miners: Miner[];
@@ -201,6 +216,7 @@ export type DashboardSnapshot = {
   blockWindows: BlockWindowRow[];
   hashrate: HashrateResponse | null;
   publicBlocks: PublicBlockRow[];
+  shareSizeHistogram: ShareSizeHistogramResponse;
 };
 
 export type NetworkInfo = {

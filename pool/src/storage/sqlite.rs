@@ -3,13 +3,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use sqlx::{Row, SqlitePool};
 use serde::Serialize;
+use sqlx::{Row, SqlitePool};
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::metrics::MetricsSnapshot;
 use crate::metrics::BlockWindowSnapshot;
+use crate::metrics::MetricsSnapshot;
 
 #[derive(Clone)]
 pub struct SqliteStore {
@@ -492,14 +492,18 @@ impl SqliteStore {
         });
 
         if !has_best_submitted {
-            sqlx::query("ALTER TABLE worker_best ADD COLUMN best_submitted_diff REAL NOT NULL DEFAULT 0")
-                .execute(pool.as_ref())
-                .await?;
+            sqlx::query(
+                "ALTER TABLE worker_best ADD COLUMN best_submitted_diff REAL NOT NULL DEFAULT 0",
+            )
+            .execute(pool.as_ref())
+            .await?;
         }
         if !has_best_accepted {
-            sqlx::query("ALTER TABLE worker_best ADD COLUMN best_accepted_diff REAL NOT NULL DEFAULT 0")
-                .execute(pool.as_ref())
-                .await?;
+            sqlx::query(
+                "ALTER TABLE worker_best ADD COLUMN best_accepted_diff REAL NOT NULL DEFAULT 0",
+            )
+            .execute(pool.as_ref())
+            .await?;
         }
         if !has_best_candidate {
             sqlx::query("ALTER TABLE worker_best ADD COLUMN best_block_candidate_diff REAL NOT NULL DEFAULT 0")
@@ -657,30 +661,33 @@ impl SqliteStore {
             FROM worker_best
             "#,
         )
-            .fetch_all(pool.as_ref())
-            .await?;
+        .fetch_all(pool.as_ref())
+        .await?;
         let mut out = HashMap::with_capacity(rows.len());
         for row in rows {
             let worker: String = row.get("worker");
             let best_submitted: f64 = row.get("best_submitted_diff");
             let best_accepted: f64 = row.get("best_accepted_diff");
             let best_block_candidate: f64 = row.get("best_block_candidate_diff");
-            out.insert(worker, (best_submitted, best_accepted, best_block_candidate));
+            out.insert(
+                worker,
+                (best_submitted, best_accepted, best_block_candidate),
+            );
         }
         Ok(out)
     }
 
-    pub async fn persist_best_snapshot(
-        &self,
-        snapshot: &MetricsSnapshot,
-    ) -> anyhow::Result<()> {
+    pub async fn persist_best_snapshot(&self, snapshot: &MetricsSnapshot) -> anyhow::Result<()> {
         let Some(_pool) = &self.pool else {
             return Ok(());
         };
 
         let global_created_at = snapshot.current_scope.created_at.to_rfc3339();
         let current_created_at = snapshot.current_scope.created_at.to_rfc3339();
-        let previous_created_at = snapshot.previous_scope.as_ref().map(|s| s.created_at.to_rfc3339());
+        let previous_created_at = snapshot
+            .previous_scope
+            .as_ref()
+            .map(|s| s.created_at.to_rfc3339());
 
         for miner in &snapshot.miners {
             let miner_last_seen = miner.last_seen.to_rfc3339();
@@ -694,10 +701,15 @@ impl SqliteStore {
                 miner.best_submitted_difficulty,
                 miner.best_accepted_difficulty,
                 miner.best_block_candidate_difficulty,
-            ).await?;
+            )
+            .await?;
 
             if let Some(session_id) = miner.session_id.as_deref() {
-                let scope_key = format!("session:{worker}:{session}", worker = miner.worker.as_str(), session = session_id);
+                let scope_key = format!(
+                    "session:{worker}:{session}",
+                    worker = miner.worker.as_str(),
+                    session = session_id
+                );
                 self.upsert_best_summary(
                     "session",
                     &scope_key,
@@ -711,7 +723,8 @@ impl SqliteStore {
                     miner.session_best_submitted_difficulty,
                     miner.session_best_accepted_difficulty,
                     miner.best_block_candidate_difficulty,
-                ).await?;
+                )
+                .await?;
             }
         }
 
@@ -729,7 +742,8 @@ impl SqliteStore {
             snapshot.global_best_submitted_difficulty,
             snapshot.global_best_accepted_difficulty,
             snapshot.global_best_block_candidate_difficulty,
-        ).await?;
+        )
+        .await?;
 
         let current_key = format!(
             "{}:{}:{}:{}",
@@ -751,15 +765,13 @@ impl SqliteStore {
             snapshot.current_block_best_submitted_difficulty,
             snapshot.current_block_best_accepted_difficulty,
             snapshot.current_block_best_candidate_difficulty,
-        ).await?;
+        )
+        .await?;
 
         if let Some(previous) = &snapshot.previous_scope {
             let previous_key = format!(
                 "{}:{}:{}:{}",
-                previous.height,
-                previous.prevhash,
-                previous.template_key,
-                previous.job_id,
+                previous.height, previous.prevhash, previous.template_key, previous.job_id,
             );
             self.upsert_best_summary(
                 "previous_block",
@@ -774,7 +786,8 @@ impl SqliteStore {
                 snapshot.previous_block_best_submitted_difficulty,
                 snapshot.previous_block_best_accepted_difficulty,
                 snapshot.previous_block_best_candidate_difficulty,
-            ).await?;
+            )
+            .await?;
         }
 
         Ok(())
@@ -994,6 +1007,73 @@ impl SqliteStore {
         Ok(out)
     }
 
+    pub async fn fetch_block_windows_since(
+        &self,
+        started_at_from: DateTime<Utc>,
+    ) -> anyhow::Result<Vec<BlockWindowRow>> {
+        let Some(pool) = &self.pool else {
+            return Ok(vec![]);
+        };
+
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id, height, prevhash, block_hash, started_at, ended_at, duration_secs,
+                external_pool, tx_count, fee_rate_sat_vb,
+                best_submitted_difficulty, best_accepted_difficulty, best_block_candidate_difficulty,
+                best_worker, best_payout_address, best_submitted_worker, best_submitted_payout_address,
+                best_accepted_worker, best_candidate_worker,
+                share_count, accepted_count, stale_count, duplicate_count,
+                avg_pool_hashrate, template_key, job_id, network_difficulty,
+                in_progress, current_template_age_secs, created_at, updated_at
+            FROM block_windows
+            WHERE started_at >= ?1
+            ORDER BY started_at DESC
+            "#,
+        )
+        .bind(started_at_from)
+        .fetch_all(pool.as_ref())
+        .await?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            out.push(BlockWindowRow {
+                id: row.get("id"),
+                height: row.get("height"),
+                prevhash: row.get("prevhash"),
+                block_hash: row.try_get("block_hash")?,
+                started_at: row.get("started_at"),
+                ended_at: row.try_get("ended_at")?,
+                duration_secs: row.try_get("duration_secs")?,
+                external_pool: row.try_get("external_pool")?,
+                tx_count: row.get("tx_count"),
+                fee_rate_sat_vb: row.try_get("fee_rate_sat_vb")?,
+                best_submitted_difficulty: row.get("best_submitted_difficulty"),
+                best_accepted_difficulty: row.get("best_accepted_difficulty"),
+                best_block_candidate_difficulty: row.get("best_block_candidate_difficulty"),
+                best_worker: row.try_get("best_worker")?,
+                best_payout_address: row.try_get("best_payout_address")?,
+                best_submitted_worker: row.try_get("best_submitted_worker")?,
+                best_submitted_payout_address: row.try_get("best_submitted_payout_address")?,
+                best_accepted_worker: row.try_get("best_accepted_worker")?,
+                best_candidate_worker: row.try_get("best_candidate_worker")?,
+                share_count: row.get("share_count"),
+                accepted_count: row.get("accepted_count"),
+                stale_count: row.get("stale_count"),
+                duplicate_count: row.get("duplicate_count"),
+                avg_pool_hashrate: row.try_get("avg_pool_hashrate")?,
+                template_key: row.get("template_key"),
+                job_id: row.get("job_id"),
+                network_difficulty: row.get("network_difficulty"),
+                in_progress: row.get::<i64, _>("in_progress") != 0,
+                current_template_age_secs: row.try_get("current_template_age_secs")?,
+                created_at: row.get("created_at"),
+                updated_at: row.get("updated_at"),
+            });
+        }
+        Ok(out)
+    }
+
     pub async fn insert_share(&self, record: ShareRecord) -> anyhow::Result<()> {
         let Some(pool) = &self.pool else {
             return Ok(());
@@ -1048,10 +1128,7 @@ impl SqliteStore {
         Ok(())
     }
 
-    pub async fn insert_block_candidate(
-        &self,
-        record: BlockCandidateRecord,
-    ) -> anyhow::Result<()> {
+    pub async fn insert_block_candidate(&self, record: BlockCandidateRecord) -> anyhow::Result<()> {
         let Some(pool) = &self.pool else {
             return Ok(());
         };
@@ -1133,7 +1210,10 @@ impl SqliteStore {
         Ok(())
     }
 
-    pub async fn fetch_block_candidates(&self, limit: i64) -> anyhow::Result<Vec<BlockCandidateRow>> {
+    pub async fn fetch_block_candidates(
+        &self,
+        limit: i64,
+    ) -> anyhow::Result<Vec<BlockCandidateRow>> {
         let Some(pool) = &self.pool else {
             return Ok(vec![]);
         };
@@ -1243,7 +1323,10 @@ impl SqliteStore {
         }))
     }
 
-    pub async fn fetch_blocks(&self, limit: i64) -> anyhow::Result<Vec<(i64, String, Option<String>, String, String)>> {
+    pub async fn fetch_blocks(
+        &self,
+        limit: i64,
+    ) -> anyhow::Result<Vec<(i64, String, Option<String>, String, String)>> {
         let Some(pool) = &self.pool else {
             return Ok(vec![]);
         };
@@ -1332,7 +1415,10 @@ mod tests {
             .await
             .expect("insert candidate");
 
-        let rows = store.fetch_block_candidates(10).await.expect("fetch candidates");
+        let rows = store
+            .fetch_block_candidates(10)
+            .await
+            .expect("fetch candidates");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].worker, "miner-1");
         assert_eq!(rows[0].block_hash, "hash");
@@ -1346,11 +1432,24 @@ mod tests {
             .fetch_block_candidate(record.id)
             .await
             .expect("fetch candidate by id");
-        assert_eq!(fetched.as_ref().and_then(|row| row.block_hex.as_deref()), Some("blockhex"));
-        assert_eq!(fetched.as_ref().and_then(|row| row.full_block_hex.as_deref()), Some("fullblock"));
-        assert_eq!(fetched.as_ref().map(|row| row.block_hash.as_str()), Some("hash"));
         assert_eq!(
-            fetched.as_ref().and_then(|row| row.full_block_hex.as_deref()),
+            fetched.as_ref().and_then(|row| row.block_hex.as_deref()),
+            Some("blockhex")
+        );
+        assert_eq!(
+            fetched
+                .as_ref()
+                .and_then(|row| row.full_block_hex.as_deref()),
+            Some("fullblock")
+        );
+        assert_eq!(
+            fetched.as_ref().map(|row| row.block_hash.as_str()),
+            Some("hash")
+        );
+        assert_eq!(
+            fetched
+                .as_ref()
+                .and_then(|row| row.full_block_hex.as_deref()),
             Some("fullblock")
         );
     }
@@ -1429,8 +1528,14 @@ mod tests {
             updated_at: now,
         };
 
-        store.upsert_block_window(older.clone()).await.expect("insert older");
-        store.upsert_block_window(current.clone()).await.expect("insert current");
+        store
+            .upsert_block_window(older.clone())
+            .await
+            .expect("insert older");
+        store
+            .upsert_block_window(current.clone())
+            .await
+            .expect("insert current");
 
         let rows = store.fetch_block_windows(10).await.expect("fetch windows");
         assert_eq!(rows.len(), 2);

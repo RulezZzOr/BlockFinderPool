@@ -13,8 +13,8 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::RwLock;
-use tracing::info;
 use tower_http::cors::{Any, CorsLayer};
+use tracing::info;
 
 use crate::build_info::{self, BuildInfo};
 use crate::config::Config;
@@ -28,6 +28,7 @@ use crate::template::{JobTemplate, TemplateEngine};
 const MINING_INFO_CACHE_TTL: StdDuration = StdDuration::from_secs(1);
 const PUBLIC_BLOCKS_CACHE_TTL: StdDuration = StdDuration::from_secs(30);
 const DASHBOARD_DB_CACHE_TTL: StdDuration = StdDuration::from_secs(5);
+const SHARE_SIZE_HISTOGRAM_CACHE_TTL: StdDuration = StdDuration::from_secs(60);
 
 #[derive(Clone)]
 pub struct ApiServer {
@@ -75,6 +76,8 @@ impl ApiServer {
             block_candidates_refreshing: Arc::new(AtomicBool::new(false)),
             persisted_block_windows_cache: Arc::new(RwLock::new(None)),
             persisted_block_windows_refreshing: Arc::new(AtomicBool::new(false)),
+            share_size_histogram_cache: Arc::new(RwLock::new(None)),
+            share_size_histogram_refreshing: Arc::new(AtomicBool::new(false)),
         };
 
         let cors = CorsLayer::new()
@@ -94,19 +97,26 @@ impl ApiServer {
             .route("/block-candidates", get(block_candidates))
             .route("/block-candidates/:id", get(block_candidate_detail))
             .route("/public-blocks", get(public_blocks))
+            .route("/share-size-histogram", get(share_size_histogram))
             .route("/pool", get(pool))
             .route("/dashboard-snapshot", get(dashboard_snapshot))
             .route("/network", get(network))
-            .route("/blockfinder/status",            get(blackhole_status))
-            .route("/blockfinder/miners",            get(blackhole_miners))
-            .route("/blockfinder/mempool",           get(blackhole_mempool))
-            .route("/blockfinder/connection-status", get(blackhole_connection_status))
-            .route("/blockfinder/template-info",     get(blackhole_template_info))
-            .route("/blackhole/status",              get(blackhole_status))
-            .route("/blackhole/miners",              get(blackhole_miners))
-            .route("/blackhole/mempool",             get(blackhole_mempool))
-            .route("/blackhole/connection-status",   get(blackhole_connection_status))
-            .route("/blackhole/template-info",       get(blackhole_template_info))
+            .route("/blockfinder/status", get(blackhole_status))
+            .route("/blockfinder/miners", get(blackhole_miners))
+            .route("/blockfinder/mempool", get(blackhole_mempool))
+            .route(
+                "/blockfinder/connection-status",
+                get(blackhole_connection_status),
+            )
+            .route("/blockfinder/template-info", get(blackhole_template_info))
+            .route("/blackhole/status", get(blackhole_status))
+            .route("/blackhole/miners", get(blackhole_miners))
+            .route("/blackhole/mempool", get(blackhole_mempool))
+            .route(
+                "/blackhole/connection-status",
+                get(blackhole_connection_status),
+            )
+            .route("/blackhole/template-info", get(blackhole_template_info))
             .with_state(state)
             .layer(cors);
 
@@ -136,6 +146,8 @@ struct ApiState {
     block_candidates_refreshing: Arc<AtomicBool>,
     persisted_block_windows_cache: Arc<RwLock<Option<CachedPersistedBlockWindows>>>,
     persisted_block_windows_refreshing: Arc<AtomicBool>,
+    share_size_histogram_cache: Arc<RwLock<Option<CachedShareSizeHistogram>>>,
+    share_size_histogram_refreshing: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -167,6 +179,46 @@ struct CachedPersistedBlockWindows {
     rows: Vec<SqlBlockWindowRow>,
     limit: i64,
     fetched_at: Instant,
+}
+
+#[derive(Clone)]
+struct CachedShareSizeHistogram {
+    days: u32,
+    source: HistogramSource,
+    histogram: ShareSizeHistogramResponse,
+    fetched_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum HistogramSource {
+    Accepted,
+    Submitted,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShareSizeHistogramBucket {
+    lower_bound_difficulty: f64,
+    upper_bound_difficulty: f64,
+    label: String,
+    count: usize,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShareSizeHistogramResponse {
+    days: u32,
+    source: HistogramSource,
+    sample_count: usize,
+    max_difficulty: f64,
+    buckets: Vec<ShareSizeHistogramBucket>,
+}
+
+#[derive(Deserialize)]
+struct ShareSizeHistogramQuery {
+    days: Option<u32>,
+    source: Option<HistogramSource>,
 }
 
 async fn health() -> impl IntoResponse {
@@ -232,10 +284,7 @@ async fn hashrate(State(state): State<ApiState>) -> impl IntoResponse {
     Json(build_hashrate_response(&state, &snapshot).await)
 }
 
-async fn build_hashrate_response(
-    state: &ApiState,
-    snapshot: &MetricsSnapshot,
-) -> HashrateResponse {
+async fn build_hashrate_response(state: &ApiState, snapshot: &MetricsSnapshot) -> HashrateResponse {
     HashrateResponse {
         total_hashrate_gh: snapshot.total_hashrate_gh,
         updated_at: snapshot.updated_at.to_rfc3339(),
@@ -308,8 +357,7 @@ async fn fetch_block_rows(state: &ApiState) -> Vec<BlockRow> {
         Err(_) => vec![],
     };
 
-    rows
-        .into_iter()
+    rows.into_iter()
         .map(|(height, hash, found_by, status, created_at)| BlockRow {
             height,
             hash,
@@ -405,7 +453,11 @@ async fn cached_persisted_block_windows(
         if cache.limit >= persisted_limit
             && now.duration_since(cache.fetched_at) <= DASHBOARD_DB_CACHE_TTL
         {
-            return cache.rows.into_iter().take(persisted_limit as usize).collect();
+            return cache
+                .rows
+                .into_iter()
+                .take(persisted_limit as usize)
+                .collect();
         }
 
         if state
@@ -416,13 +468,18 @@ async fn cached_persisted_block_windows(
             let state_for_refresh = state.clone();
             let refresh_limit = persisted_limit.max(cache.limit);
             tokio::spawn(async move {
-                let _ = refresh_persisted_block_windows_cache(&state_for_refresh, refresh_limit).await;
+                let _ =
+                    refresh_persisted_block_windows_cache(&state_for_refresh, refresh_limit).await;
                 state_for_refresh
                     .persisted_block_windows_refreshing
                     .store(false, Ordering::Relaxed);
             });
         }
-        return cache.rows.into_iter().take(persisted_limit as usize).collect();
+        return cache
+            .rows
+            .into_iter()
+            .take(persisted_limit as usize)
+            .collect();
     }
 
     refresh_persisted_block_windows_cache(state, persisted_limit).await
@@ -499,10 +556,18 @@ fn merge_current_block_window(current: &mut SqlBlockWindowRow, stale_current: &S
             std::cmp::min(current.started_at.clone(), stale_current.started_at.clone());
         current.created_at =
             std::cmp::min(current.created_at.clone(), stale_current.created_at.clone());
-        current.share_count = current.share_count.saturating_add(stale_current.share_count);
-        current.accepted_count = current.accepted_count.saturating_add(stale_current.accepted_count);
-        current.stale_count = current.stale_count.saturating_add(stale_current.stale_count);
-        current.duplicate_count = current.duplicate_count.saturating_add(stale_current.duplicate_count);
+        current.share_count = current
+            .share_count
+            .saturating_add(stale_current.share_count);
+        current.accepted_count = current
+            .accepted_count
+            .saturating_add(stale_current.accepted_count);
+        current.stale_count = current
+            .stale_count
+            .saturating_add(stale_current.stale_count);
+        current.duplicate_count = current
+            .duplicate_count
+            .saturating_add(stale_current.duplicate_count);
     }
 
     if stale_current.best_submitted_difficulty > current.best_submitted_difficulty {
@@ -544,8 +609,7 @@ async fn fetch_block_candidate_rows(state: &ApiState) -> Vec<BlockCandidateRow> 
         Err(_) => vec![],
     };
 
-    rows
-        .into_iter()
+    rows.into_iter()
         .map(|row: SqlBlockCandidateRow| BlockCandidateRow {
             timestamp: row.timestamp,
             worker: row.worker,
@@ -641,6 +705,15 @@ async fn public_blocks(State(state): State<ApiState>) -> impl IntoResponse {
     Json(cached_public_blocks(&state).await)
 }
 
+async fn share_size_histogram(
+    Query(query): Query<ShareSizeHistogramQuery>,
+    State(state): State<ApiState>,
+) -> impl IntoResponse {
+    let days = query.days.unwrap_or(30).clamp(1, 365);
+    let source = query.source.unwrap_or(HistogramSource::Accepted);
+    Json(cached_share_size_histogram(&state, days, source).await)
+}
+
 async fn cached_public_blocks(state: &ApiState) -> Vec<PublicBlockRow> {
     let now = Instant::now();
     if let Some(cache) = state.public_blocks_cache.read().await.clone() {
@@ -687,6 +760,243 @@ async fn refresh_public_blocks_cache(state: &ApiState) -> Vec<PublicBlockRow> {
     rows
 }
 
+async fn cached_share_size_histogram(
+    state: &ApiState,
+    days: u32,
+    source: HistogramSource,
+) -> ShareSizeHistogramResponse {
+    let now = Instant::now();
+    if let Some(cache) = state.share_size_histogram_cache.read().await.clone() {
+        if cache.days == days
+            && cache.source == source
+            && now.duration_since(cache.fetched_at) <= SHARE_SIZE_HISTOGRAM_CACHE_TTL
+        {
+            return cache.histogram;
+        }
+
+        if cache.days == days && cache.source == source {
+            if state
+                .share_size_histogram_refreshing
+                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                let state_for_refresh = state.clone();
+                tokio::spawn(async move {
+                    let _ =
+                        refresh_share_size_histogram_cache(&state_for_refresh, days, source).await;
+                    state_for_refresh
+                        .share_size_histogram_refreshing
+                        .store(false, Ordering::Relaxed);
+                });
+            }
+            return cache.histogram;
+        }
+    }
+
+    refresh_share_size_histogram_cache(state, days, source).await
+}
+
+async fn refresh_share_size_histogram_cache(
+    state: &ApiState,
+    days: u32,
+    source: HistogramSource,
+) -> ShareSizeHistogramResponse {
+    let histogram = build_share_size_histogram(state, days, source).await;
+    let mut cache = state.share_size_histogram_cache.write().await;
+    *cache = Some(CachedShareSizeHistogram {
+        days,
+        source,
+        histogram: histogram.clone(),
+        fetched_at: Instant::now(),
+    });
+    histogram
+}
+
+async fn build_share_size_histogram(
+    state: &ApiState,
+    days: u32,
+    source: HistogramSource,
+) -> ShareSizeHistogramResponse {
+    let rows = fetch_block_window_rows_since(state, days).await;
+    build_share_size_histogram_from_rows(days, source, rows)
+}
+
+async fn fetch_block_window_rows_since(state: &ApiState, days: u32) -> Vec<SqlBlockWindowRow> {
+    let cutoff = Utc::now() - Duration::days(days as i64);
+    let current_template_age_secs = state.template_engine.template_age_secs();
+    let current = state
+        .metrics
+        .current_block_window_snapshot(current_template_age_secs)
+        .await;
+    let current = current.into();
+    let finalized_pending = state
+        .metrics
+        .finalized_block_windows_snapshot()
+        .await
+        .into_iter()
+        .map(SqlBlockWindowRow::from)
+        .collect::<Vec<_>>();
+    let persisted = match state.sqlite.fetch_block_windows_since(cutoff).await {
+        Ok(rows) => rows,
+        Err(_) => vec![],
+    };
+    let merged = merge_block_windows(
+        current,
+        finalized_pending.clone(),
+        persisted.clone(),
+        persisted.len() + finalized_pending.len() + 1,
+    );
+
+    merged
+        .into_iter()
+        .filter(|row| {
+            block_window_started_at(row)
+                .map(|dt| dt >= cutoff)
+                .unwrap_or(true)
+        })
+        .collect()
+}
+
+fn build_share_size_histogram_from_rows(
+    days: u32,
+    source: HistogramSource,
+    rows: Vec<SqlBlockWindowRow>,
+) -> ShareSizeHistogramResponse {
+    let difficulties = rows
+        .into_iter()
+        .filter_map(|row| match source {
+            HistogramSource::Accepted => Some(row.best_accepted_difficulty),
+            HistogramSource::Submitted => Some(row.best_submitted_difficulty),
+        })
+        .filter(|difficulty| difficulty.is_finite() && *difficulty > 0.0)
+        .collect::<Vec<_>>();
+
+    build_share_size_histogram_from_difficulties(days, source, difficulties)
+}
+
+fn build_share_size_histogram_from_difficulties(
+    days: u32,
+    source: HistogramSource,
+    difficulties: Vec<f64>,
+) -> ShareSizeHistogramResponse {
+    if difficulties.is_empty() {
+        return ShareSizeHistogramResponse {
+            days,
+            source,
+            sample_count: 0,
+            max_difficulty: 0.0,
+            buckets: vec![],
+        };
+    }
+
+    let sample_count = difficulties.len();
+    let max_difficulty = difficulties.iter().copied().fold(0.0_f64, f64::max);
+    let min_difficulty = difficulties
+        .iter()
+        .copied()
+        .filter(|difficulty| *difficulty > 0.0)
+        .fold(f64::INFINITY, f64::min);
+    let bounds = build_histogram_bounds(min_difficulty, max_difficulty);
+    let mut counts = vec![0usize; bounds.len()];
+
+    for difficulty in difficulties {
+        let bucket_idx = bounds
+            .iter()
+            .position(|(_, upper_bound, _)| difficulty <= *upper_bound)
+            .unwrap_or(bounds.len().saturating_sub(1));
+        if let Some(count) = counts.get_mut(bucket_idx) {
+            *count += 1;
+        }
+    }
+
+    let first_nonzero = counts.iter().position(|count| *count > 0).unwrap_or(0);
+    let last_nonzero = counts
+        .iter()
+        .rposition(|count| *count > 0)
+        .unwrap_or(bounds.len().saturating_sub(1));
+
+    let buckets = bounds
+        .into_iter()
+        .zip(counts)
+        .enumerate()
+        .filter(|(idx, _)| *idx >= first_nonzero && *idx <= last_nonzero)
+        .map(
+            |(_, ((lower_bound_difficulty, upper_bound_difficulty, label), count))| {
+                ShareSizeHistogramBucket {
+                    lower_bound_difficulty,
+                    upper_bound_difficulty,
+                    label,
+                    count,
+                }
+            },
+        )
+        .collect::<Vec<_>>();
+
+    ShareSizeHistogramResponse {
+        days,
+        source,
+        sample_count,
+        max_difficulty,
+        buckets,
+    }
+}
+
+fn build_histogram_bounds(min_difficulty: f64, max_difficulty: f64) -> Vec<(f64, f64, String)> {
+    let mut bounds = Vec::new();
+    let mut lower_bound = 0.0;
+    let start_exp = min_difficulty.log10().floor() as i32 - 1;
+    let end_exp = max_difficulty.log10().ceil() as i32 + 1;
+
+    for exp in start_exp..=end_exp {
+        let scale = 10_f64.powi(exp);
+        for factor in [1.0_f64, 2.0, 5.0] {
+            let upper_bound = factor * scale;
+            if !upper_bound.is_finite() || upper_bound <= 0.0 {
+                continue;
+            }
+            bounds.push((
+                lower_bound,
+                upper_bound,
+                format_histogram_difficulty(upper_bound),
+            ));
+            lower_bound = upper_bound;
+            if upper_bound >= max_difficulty {
+                return bounds;
+            }
+        }
+    }
+
+    vec![(
+        0.0,
+        max_difficulty,
+        format_histogram_difficulty(max_difficulty),
+    )]
+}
+
+fn format_histogram_difficulty(difficulty: f64) -> String {
+    if difficulty >= 1e18 {
+        format!("{:.0}E", difficulty / 1e18)
+    } else if difficulty >= 1e15 {
+        format!("{:.0}P", difficulty / 1e15)
+    } else if difficulty >= 1e12 {
+        format!("{:.0}T", difficulty / 1e12)
+    } else if difficulty >= 1e9 {
+        format!("{:.0}G", difficulty / 1e9)
+    } else if difficulty >= 1e6 {
+        format!("{:.0}M", difficulty / 1e6)
+    } else if difficulty >= 1e3 {
+        format!("{:.0}K", difficulty / 1e3)
+    } else {
+        format!("{difficulty:.0}")
+    }
+}
+
+fn block_window_started_at(row: &SqlBlockWindowRow) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(&row.started_at)
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
 async fn fetch_public_blocks_from_mempool() -> Vec<PublicBlockRow> {
     let client = match Client::builder()
         .connect_timeout(std::time::Duration::from_secs(2))
@@ -703,7 +1013,12 @@ async fn fetch_public_blocks_from_mempool() -> Vec<PublicBlockRow> {
         .await
         .and_then(|r| r.error_for_status())
     {
-        Ok(response) => match response.text().await.ok().and_then(|s| s.trim().parse::<i64>().ok()) {
+        Ok(response) => match response
+            .text()
+            .await
+            .ok()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+        {
             Some(height) => height,
             None => return Vec::new(),
         },
@@ -731,7 +1046,9 @@ async fn fetch_public_blocks_from_mempool() -> Vec<PublicBlockRow> {
             let hash = block.id.or(block.hash)?;
             let timestamp = DateTime::<Utc>::from_timestamp(block.timestamp?, 0)?.to_rfc3339();
             let pool = block.extras.and_then(|extras| {
-                extras.pool.and_then(|pool| pool.name.or(pool.slug))
+                extras
+                    .pool
+                    .and_then(|pool| pool.name.or(pool.slug))
                     .or(extras.pool_name)
                     .or(extras.pool_name_alt)
                     .or(extras.miner)
@@ -842,6 +1159,7 @@ struct DashboardSnapshot {
     blockWindows: Vec<SqlBlockWindowRow>,
     hashrate: HashrateResponse,
     publicBlocks: Vec<PublicBlockRow>,
+    shareSizeHistogram: ShareSizeHistogramResponse,
 }
 
 async fn dashboard_snapshot(State(state): State<ApiState>) -> impl IntoResponse {
@@ -850,11 +1168,12 @@ async fn dashboard_snapshot(State(state): State<ApiState>) -> impl IntoResponse 
     let pool = build_pool_info_from_snapshot(&state, &snapshot, mining_info.as_ref());
     let hashrate = build_hashrate_response(&state, &snapshot).await;
     let miners = snapshot.miners.clone();
-    let (blocks, block_candidates, block_windows, public_blocks) = tokio::join!(
+    let (blocks, block_candidates, block_windows, public_blocks, share_size_histogram) = tokio::join!(
         cached_block_rows(&state),
         cached_block_candidate_rows(&state),
         fetch_block_window_rows(&state, 10),
         cached_public_blocks(&state),
+        cached_share_size_histogram(&state, 30, HistogramSource::Accepted),
     );
 
     Json(DashboardSnapshot {
@@ -865,6 +1184,7 @@ async fn dashboard_snapshot(State(state): State<ApiState>) -> impl IntoResponse 
         blockWindows: block_windows,
         hashrate,
         publicBlocks: public_blocks,
+        shareSizeHistogram: share_size_histogram,
     })
 }
 
@@ -899,9 +1219,7 @@ fn build_pool_info_from_snapshot(
         0.0
     };
 
-    let uptime_secs = (Utc::now() - state.metrics.started_at)
-        .num_seconds()
-        .max(1) as u64;
+    let uptime_secs = (Utc::now() - state.metrics.started_at).num_seconds().max(1) as u64;
     let uptime_min = uptime_secs as f64 / 60.0;
     let miners_count = total_miners.max(1) as f64;
     let jobs_sent_per_miner = c.jobs_sent() as f64 / miners_count;
@@ -912,33 +1230,33 @@ fn build_pool_info_from_snapshot(
     let clean_jobs_last_notify_at = state.metrics.counters.last_clean_jobs_notify_at();
 
     let block_to_template_ms = match (last_block_at, clean_jobs_template_at) {
-        (Some(block_at), Some(template_at)) => Some(
-            (template_at - block_at).num_milliseconds().max(0) as u64,
-        ),
+        (Some(block_at), Some(template_at)) => {
+            Some((template_at - block_at).num_milliseconds().max(0) as u64)
+        }
         _ => None,
     };
     let template_to_first_notify_ms = match (clean_jobs_template_at, clean_jobs_first_notify_at) {
-        (Some(template_at), Some(first_notify_at)) => Some(
-            (first_notify_at - template_at).num_milliseconds().max(0) as u64,
-        ),
+        (Some(template_at), Some(first_notify_at)) => {
+            Some((first_notify_at - template_at).num_milliseconds().max(0) as u64)
+        }
         _ => None,
     };
     let template_to_last_notify_ms = match (clean_jobs_template_at, clean_jobs_last_notify_at) {
-        (Some(template_at), Some(last_notify_at)) => Some(
-            (last_notify_at - template_at).num_milliseconds().max(0) as u64,
-        ),
+        (Some(template_at), Some(last_notify_at)) => {
+            Some((last_notify_at - template_at).num_milliseconds().max(0) as u64)
+        }
         _ => None,
     };
     let block_to_first_notify_ms = match (last_block_at, clean_jobs_first_notify_at) {
-        (Some(block_at), Some(first_notify_at)) => Some(
-            (first_notify_at - block_at).num_milliseconds().max(0) as u64,
-        ),
+        (Some(block_at), Some(first_notify_at)) => {
+            Some((first_notify_at - block_at).num_milliseconds().max(0) as u64)
+        }
         _ => None,
     };
     let block_to_last_notify_ms = match (last_block_at, clean_jobs_last_notify_at) {
-        (Some(block_at), Some(last_notify_at)) => Some(
-            (last_notify_at - block_at).num_milliseconds().max(0) as u64,
-        ),
+        (Some(block_at), Some(last_notify_at)) => {
+            Some((last_notify_at - block_at).num_milliseconds().max(0) as u64)
+        }
         _ => None,
     };
 
@@ -948,34 +1266,34 @@ fn build_pool_info_from_snapshot(
         blockHeight: block_height,
         blocksFound: blocks_found,
         fee: 0,
-        poolStartedAt:          state.metrics.started_at.to_rfc3339(),
-        uptimeSecs:             uptime_secs,
-        jobsSent:               c.jobs_sent(),
-        cleanJobsSent:          c.clean_jobs_sent(),
-        jobsSentPerMiner:       jobs_sent_per_miner,
+        poolStartedAt: state.metrics.started_at.to_rfc3339(),
+        uptimeSecs: uptime_secs,
+        jobsSent: c.jobs_sent(),
+        cleanJobsSent: c.clean_jobs_sent(),
+        jobsSentPerMiner: jobs_sent_per_miner,
         jobsSentPerMinerPerMin: jobs_sent_per_miner_per_min,
-        notifyDeduped:          c.notify_deduped(),
-        notifyRateLimited:      c.notify_rate_limited(),
-        duplicateShares:        c.duplicate_shares(),
-        reconnectsTotal:        c.reconnects_total(),
-        submitblockAccepted:    c.submitblock_accepted(),
-        submitblockRejected:    c.submitblock_rejected(),
-        submitblockRpcFail:     c.submitblock_rpc_fail(),
+        notifyDeduped: c.notify_deduped(),
+        notifyRateLimited: c.notify_rate_limited(),
+        duplicateShares: c.duplicate_shares(),
+        reconnectsTotal: c.reconnects_total(),
+        submitblockAccepted: c.submitblock_accepted(),
+        submitblockRejected: c.submitblock_rejected(),
+        submitblockRpcFail: c.submitblock_rpc_fail(),
         versionRollingViolations: c.version_rolling_violations(),
-        stalesNewBlock:         c.stales_new_block(),
-        stalesExpired:          c.stales_expired(),
-        stalesReconnect:        c.stales_reconnect(),
-        zmqBlocksDetected:          c.zmq_blocks_detected(),
-        zmqBlockNotifications:      c.zmq_block_received(),
-        zmqTxTriggered:             c.zmq_tx_triggered(),
-        zmqTxDebounced:             c.zmq_tx_debounced(),
-        zmqTxPostBlockSuppressed:   c.zmq_tx_post_block_suppressed(),
-        staleRatio:             stale_ratio,
-        submitRttP50Ms:         snapshot.submit_rtt_p50_ms,
-        submitRttP95Ms:         snapshot.submit_rtt_p95_ms,
-        submitRttP99Ms:         snapshot.submit_rtt_p99_ms,
-        submitRttMaxMs:         snapshot.submit_rtt_max_ms,
-        submitRttOver50MsCount:  snapshot.submit_rtt_over_50ms_count,
+        stalesNewBlock: c.stales_new_block(),
+        stalesExpired: c.stales_expired(),
+        stalesReconnect: c.stales_reconnect(),
+        zmqBlocksDetected: c.zmq_blocks_detected(),
+        zmqBlockNotifications: c.zmq_block_received(),
+        zmqTxTriggered: c.zmq_tx_triggered(),
+        zmqTxDebounced: c.zmq_tx_debounced(),
+        zmqTxPostBlockSuppressed: c.zmq_tx_post_block_suppressed(),
+        staleRatio: stale_ratio,
+        submitRttP50Ms: snapshot.submit_rtt_p50_ms,
+        submitRttP95Ms: snapshot.submit_rtt_p95_ms,
+        submitRttP99Ms: snapshot.submit_rtt_p99_ms,
+        submitRttMaxMs: snapshot.submit_rtt_max_ms,
+        submitRttOver50MsCount: snapshot.submit_rtt_over_50ms_count,
         submitRttOver100MsCount: snapshot.submit_rtt_over_100ms_count,
         globalBestSubmittedDifficulty: snapshot.global_best_submitted_difficulty,
         globalBestAcceptedDifficulty: snapshot.global_best_accepted_difficulty,
@@ -995,8 +1313,14 @@ fn build_pool_info_from_snapshot(
             .template_engine
             .last_template_refresh_at()
             .map(|dt| dt.to_rfc3339()),
-        lastZmqBlockAt: state.template_engine.last_zmq_block_trigger_at().map(|dt| dt.to_rfc3339()),
-        lastZmqTxAt: state.template_engine.last_zmq_tx_trigger_at().map(|dt| dt.to_rfc3339()),
+        lastZmqBlockAt: state
+            .template_engine
+            .last_zmq_block_trigger_at()
+            .map(|dt| dt.to_rfc3339()),
+        lastZmqTxAt: state
+            .template_engine
+            .last_zmq_tx_trigger_at()
+            .map(|dt| dt.to_rfc3339()),
         currentTemplateAgeSecs: state.template_engine.template_age_secs(),
         templateAgeSecs: state.template_engine.template_age_secs(),
         templateStale: state
@@ -1005,7 +1329,11 @@ fn build_pool_info_from_snapshot(
             .map(|age| age > state.config.template_max_age_secs)
             .unwrap_or(true),
         zmqConnected: state.template_engine.zmq_connected(),
-        lastCleanJobsNotifyAt: state.metrics.counters.last_clean_jobs_notify_at().map(|dt| dt.to_rfc3339()),
+        lastCleanJobsNotifyAt: state
+            .metrics
+            .counters
+            .last_clean_jobs_notify_at()
+            .map(|dt| dt.to_rfc3339()),
         cleanJobsFirstNotifyAt: clean_jobs_first_notify_at.map(|dt| dt.to_rfc3339()),
         cleanJobsLastNotifyAt: clean_jobs_last_notify_at.map(|dt| dt.to_rfc3339()),
         cleanJobsTemplateAt: clean_jobs_template_at.map(|dt| dt.to_rfc3339()),
@@ -1021,13 +1349,32 @@ fn build_pool_info_from_snapshot(
         currentBlockTemplateKey: snapshot.current_scope.template_key.clone(),
         currentBlockJobId: snapshot.current_scope.job_id.clone(),
         currentBlockCreatedAt: snapshot.current_scope.created_at.to_rfc3339(),
-        previousBlockHeight: snapshot.previous_scope.as_ref().map(|s| s.height).unwrap_or(0),
-        previousBlockPrevhash: snapshot.previous_scope.as_ref().map(|s| s.prevhash.clone()).unwrap_or_default(),
-        previousBlockTemplateKey: snapshot.previous_scope.as_ref().map(|s| s.template_key.clone()).unwrap_or_default(),
-        previousBlockJobId: snapshot.previous_scope.as_ref().map(|s| s.job_id.clone()).unwrap_or_default(),
-        previousBlockCreatedAt: snapshot.previous_scope.as_ref().map(|s| s.created_at.to_rfc3339()),
+        previousBlockHeight: snapshot
+            .previous_scope
+            .as_ref()
+            .map(|s| s.height)
+            .unwrap_or(0),
+        previousBlockPrevhash: snapshot
+            .previous_scope
+            .as_ref()
+            .map(|s| s.prevhash.clone())
+            .unwrap_or_default(),
+        previousBlockTemplateKey: snapshot
+            .previous_scope
+            .as_ref()
+            .map(|s| s.template_key.clone())
+            .unwrap_or_default(),
+        previousBlockJobId: snapshot
+            .previous_scope
+            .as_ref()
+            .map(|s| s.job_id.clone())
+            .unwrap_or_default(),
+        previousBlockCreatedAt: snapshot
+            .previous_scope
+            .as_ref()
+            .map(|s| s.created_at.to_rfc3339()),
         networkDifficulty: mining_info.map(|i| i.difficulty).unwrap_or(0.0),
-        networkHashps:     mining_info.and_then(|i| i.networkhashps).unwrap_or(0.0),
+        networkHashps: mining_info.and_then(|i| i.networkhashps).unwrap_or(0.0),
     }
 }
 
@@ -1071,12 +1418,16 @@ struct BlockFinderVardiff {
 async fn blackhole_status(State(state): State<ApiState>) -> impl IntoResponse {
     let payout = state.config.payout_address.trim().to_string();
     let payout_configured = !payout.is_empty();
-    let payout_address = if payout_configured { Some(payout) } else { None };
+    let payout_address = if payout_configured {
+        Some(payout)
+    } else {
+        None
+    };
     let network = match state.config.network {
-        bitcoin::Network::Bitcoin  => "mainnet",
-        bitcoin::Network::Testnet  => "testnet",
-        bitcoin::Network::Signet   => "signet",
-        bitcoin::Network::Regtest  => "regtest",
+        bitcoin::Network::Bitcoin => "mainnet",
+        bitcoin::Network::Testnet => "testnet",
+        bitcoin::Network::Signet => "signet",
+        bitcoin::Network::Regtest => "regtest",
         _ => "unknown",
     }
     .to_string();
@@ -1092,10 +1443,10 @@ async fn blackhole_status(State(state): State<ApiState>) -> impl IntoResponse {
         stratumPort: state.config.stratum_port,
         templateRefreshIntervalMs: state.config.template_poll_ms,
         vardiff: BlockFinderVardiff {
-            targetShareTimeSec:  state.config.target_share_time_secs,
-            checkIntervalSec:    state.config.vardiff_retarget_time_secs,
-            minDifficulty:       state.config.min_difficulty,
-            maxDifficulty:       state.config.max_difficulty,
+            targetShareTimeSec: state.config.target_share_time_secs,
+            checkIntervalSec: state.config.vardiff_retarget_time_secs,
+            minDifficulty: state.config.min_difficulty,
+            maxDifficulty: state.config.max_difficulty,
         },
         uptime: state.started_at,
         build: build_info::current(),
@@ -1164,9 +1515,9 @@ async fn blackhole_miners(State(state): State<ApiState>) -> impl IntoResponse {
         .miners
         .into_iter()
         .map(|miner| BlockFinderWorker {
-            sessionId:      miner.session_id,
-            name:           miner.worker,
-            userAgent:      miner.user_agent,
+            sessionId: miner.session_id,
+            name: miner.worker,
+            userAgent: miner.user_agent,
             bestDifficulty: miner.best_submitted_difficulty,
             bestSubmittedDifficulty: miner.best_submitted_difficulty,
             bestAcceptedDifficulty: miner.best_accepted_difficulty,
@@ -1178,19 +1529,23 @@ async fn blackhole_miners(State(state): State<ApiState>) -> impl IntoResponse {
             currentBlockBestSubmittedDifficulty: miner.current_block_best_submitted_difficulty,
             currentBlockBestAcceptedDifficulty: miner.current_block_best_accepted_difficulty,
             currentBlockBestCandidateDifficulty: miner.current_block_best_candidate_difficulty,
-            hashRate:       miner.hashrate_gh * 1_000_000_000.0,
-            startTime:      miner.session_start.map(|t| t.to_rfc3339()),
-            lastSeen:       miner.last_seen.to_rfc3339(),
+            hashRate: miner.hashrate_gh * 1_000_000_000.0,
+            startTime: miner.session_start.map(|t| t.to_rfc3339()),
+            lastSeen: miner.last_seen.to_rfc3339(),
             lastShareStatus: miner.last_share_status,
             lastShareDifficulty: miner.last_share_difficulty,
             lastShareAt: miner.last_share_at.map(|t| t.to_rfc3339()),
         })
         .collect::<Vec<_>>();
 
-    workers.sort_by(|a, b| b.hashRate.partial_cmp(&a.hashRate).unwrap_or(std::cmp::Ordering::Equal));
+    workers.sort_by(|a, b| {
+        b.hashRate
+            .partial_cmp(&a.hashRate)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     Json(BlockFinderMinerList {
-        address:        state.config.payout_address.clone(),
+        address: state.config.payout_address.clone(),
         bestDifficulty: best,
         bestSubmittedDifficulty: best,
         bestAcceptedDifficulty: best_accepted,
@@ -1203,8 +1558,6 @@ async fn blackhole_miners(State(state): State<ApiState>) -> impl IntoResponse {
     })
 }
 
-
-
 async fn blackhole_mempool(State(state): State<ApiState>) -> impl IntoResponse {
     let result: serde_json::Value = match state
         .rpc
@@ -1212,7 +1565,7 @@ async fn blackhole_mempool(State(state): State<ApiState>) -> impl IntoResponse {
         .await
     {
         Ok(val) => val,
-        Err(_)  => serde_json::json!({}),
+        Err(_) => serde_json::json!({}),
     };
     Json(result)
 }
@@ -1250,7 +1603,11 @@ struct ConnectionStatus {
 async fn blackhole_connection_status(State(state): State<ApiState>) -> impl IntoResponse {
     let start = std::time::Instant::now();
     let connected = fetch_mining_info(&state.rpc).await.is_ok();
-    let latency = if connected { Some(start.elapsed().as_millis() as u64) } else { None };
+    let latency = if connected {
+        Some(start.elapsed().as_millis() as u64)
+    } else {
+        None
+    };
     let port = parse_port(&state.config.rpc_url);
 
     Json(ConnectionStatus {
@@ -1271,7 +1628,7 @@ async fn blackhole_connection_status(State(state): State<ApiState>) -> impl Into
             },
         },
         stratum: StratumStatus {
-            port:      state.config.stratum_port,
+            port: state.config.stratum_port,
             connected: state.metrics.counters.is_stratum_ready(),
         },
     })
@@ -1298,17 +1655,17 @@ async fn blackhole_template_info(State(state): State<ApiState>) -> impl IntoResp
     let info = if job.ready {
         let ntime_u32 = u32::from_str_radix(job.ntime.trim_start_matches("0x"), 16).unwrap_or(0);
         Some(TemplateInfo {
-            height:            job.height,
-            version:           job.version_u32,
-            bits:              job.nbits.clone(),
+            height: job.height,
+            version: job.version_u32,
+            bits: job.nbits.clone(),
             previousblockhash: job.prevhash_le.clone(),
-            coinbasevalue:     job.coinbase_value,
-            mintime:           job.mintime_u32 as u64,
-            curtime:           ntime_u32 as u64,
-            transactions:      job.transactions.len(),
-            target:            job.target.clone(),
-            job_id:            job.job_id.clone(),
-            created_at:        job.created_at.to_rfc3339(),
+            coinbasevalue: job.coinbase_value,
+            mintime: job.mintime_u32 as u64,
+            curtime: ntime_u32 as u64,
+            transactions: job.transactions.len(),
+            target: job.target.clone(),
+            job_id: job.job_id.clone(),
+            created_at: job.created_at.to_rfc3339(),
         })
     } else {
         None
@@ -1342,7 +1699,11 @@ mod tests {
             id: id.to_string(),
             height,
             prevhash: format!("prev-{id}"),
-            block_hash: if in_progress { None } else { Some(format!("hash-{id}")) },
+            block_hash: if in_progress {
+                None
+            } else {
+                Some(format!("hash-{id}"))
+            },
             started_at: "2026-04-22T00:00:00Z".to_string(),
             ended_at: if in_progress {
                 None
@@ -1496,7 +1857,10 @@ mod tests {
         let value = serde_json::to_value(pool).expect("pool serializes");
         assert_eq!(value["rawBest"], Value::from(12.0));
         assert_eq!(value["acceptedBest"], Value::from(11.0));
-        assert_eq!(value["currentBlockBestSubmittedDifficulty"], Value::from(9.0));
+        assert_eq!(
+            value["currentBlockBestSubmittedDifficulty"],
+            Value::from(9.0)
+        );
         assert_eq!(value["zmqConnected"], Value::from(true));
         assert_eq!(value["rpcHealthy"], Value::from(true));
         assert_eq!(value["templateRefreshFailures"], Value::from(0));
@@ -1663,8 +2027,72 @@ mod tests {
             created_at: "2026-04-22T00:00:00Z".to_string(),
             updated_at: "2026-04-22T00:00:00Z".to_string(),
         };
-        let finalized_old = SqlBlockWindowRow { id: "old".to_string(), height: 198, prevhash: "p1".to_string(), block_hash: Some("h1".to_string()), started_at: "2026-04-21T00:00:00Z".to_string(), ended_at: Some("2026-04-21T00:10:00Z".to_string()), duration_secs: Some(600), external_pool: None, tx_count: 2, fee_rate_sat_vb: None, best_submitted_difficulty: 1.0, best_accepted_difficulty: 1.0, best_block_candidate_difficulty: 0.0, best_worker: Some("w1".to_string()), best_payout_address: None, best_submitted_worker: Some("w1".to_string()), best_submitted_payout_address: None, best_accepted_worker: Some("w1".to_string()), best_candidate_worker: None, share_count: 1, accepted_count: 1, stale_count: 0, duplicate_count: 0, avg_pool_hashrate: None, template_key: "t1".to_string(), job_id: "j1".to_string(), network_difficulty: 1.0, in_progress: false, current_template_age_secs: None, created_at: "2026-04-21T00:00:00Z".to_string(), updated_at: "2026-04-21T00:10:00Z".to_string() };
-        let finalized_new = SqlBlockWindowRow { id: "new".to_string(), height: 199, prevhash: "p2".to_string(), block_hash: Some("h2".to_string()), started_at: "2026-04-21T01:00:00Z".to_string(), ended_at: Some("2026-04-21T01:10:00Z".to_string()), duration_secs: Some(600), external_pool: None, tx_count: 2, fee_rate_sat_vb: None, best_submitted_difficulty: 2.0, best_accepted_difficulty: 2.0, best_block_candidate_difficulty: 0.0, best_worker: Some("w2".to_string()), best_payout_address: None, best_submitted_worker: Some("w2".to_string()), best_submitted_payout_address: None, best_accepted_worker: Some("w2".to_string()), best_candidate_worker: None, share_count: 2, accepted_count: 2, stale_count: 0, duplicate_count: 0, avg_pool_hashrate: None, template_key: "t2".to_string(), job_id: "j2".to_string(), network_difficulty: 2.0, in_progress: false, current_template_age_secs: None, created_at: "2026-04-21T01:00:00Z".to_string(), updated_at: "2026-04-21T01:10:00Z".to_string() };
+        let finalized_old = SqlBlockWindowRow {
+            id: "old".to_string(),
+            height: 198,
+            prevhash: "p1".to_string(),
+            block_hash: Some("h1".to_string()),
+            started_at: "2026-04-21T00:00:00Z".to_string(),
+            ended_at: Some("2026-04-21T00:10:00Z".to_string()),
+            duration_secs: Some(600),
+            external_pool: None,
+            tx_count: 2,
+            fee_rate_sat_vb: None,
+            best_submitted_difficulty: 1.0,
+            best_accepted_difficulty: 1.0,
+            best_block_candidate_difficulty: 0.0,
+            best_worker: Some("w1".to_string()),
+            best_payout_address: None,
+            best_submitted_worker: Some("w1".to_string()),
+            best_submitted_payout_address: None,
+            best_accepted_worker: Some("w1".to_string()),
+            best_candidate_worker: None,
+            share_count: 1,
+            accepted_count: 1,
+            stale_count: 0,
+            duplicate_count: 0,
+            avg_pool_hashrate: None,
+            template_key: "t1".to_string(),
+            job_id: "j1".to_string(),
+            network_difficulty: 1.0,
+            in_progress: false,
+            current_template_age_secs: None,
+            created_at: "2026-04-21T00:00:00Z".to_string(),
+            updated_at: "2026-04-21T00:10:00Z".to_string(),
+        };
+        let finalized_new = SqlBlockWindowRow {
+            id: "new".to_string(),
+            height: 199,
+            prevhash: "p2".to_string(),
+            block_hash: Some("h2".to_string()),
+            started_at: "2026-04-21T01:00:00Z".to_string(),
+            ended_at: Some("2026-04-21T01:10:00Z".to_string()),
+            duration_secs: Some(600),
+            external_pool: None,
+            tx_count: 2,
+            fee_rate_sat_vb: None,
+            best_submitted_difficulty: 2.0,
+            best_accepted_difficulty: 2.0,
+            best_block_candidate_difficulty: 0.0,
+            best_worker: Some("w2".to_string()),
+            best_payout_address: None,
+            best_submitted_worker: Some("w2".to_string()),
+            best_submitted_payout_address: None,
+            best_accepted_worker: Some("w2".to_string()),
+            best_candidate_worker: None,
+            share_count: 2,
+            accepted_count: 2,
+            stale_count: 0,
+            duplicate_count: 0,
+            avg_pool_hashrate: None,
+            template_key: "t2".to_string(),
+            job_id: "j2".to_string(),
+            network_difficulty: 2.0,
+            in_progress: false,
+            current_template_age_secs: None,
+            created_at: "2026-04-21T01:00:00Z".to_string(),
+            updated_at: "2026-04-21T01:10:00Z".to_string(),
+        };
 
         let rows = merge_block_windows(current, vec![finalized_old, finalized_new], vec![], 10);
         assert_eq!(rows.len(), 3);

@@ -1,17 +1,17 @@
 use anyhow::{anyhow, Context};
 use reqwest::Client;
-use std::time::Duration;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::json;
+use std::time::Duration;
 
 #[derive(Clone)]
 pub struct RpcClient {
-    url:            String,
-    user:           String,
-    pass:           String,
+    url: String,
+    user: String,
+    pass: String,
     /// Fast client: 8s timeout for all normal RPC calls (submit, getinfo, etc.)
-    client:         Client,
+    client: Client,
     /// Slow client: 130s timeout exclusively for getblocktemplate with longpollid.
     /// Bitcoin Core holds the connection open for ~90s until the template changes.
     /// Using the fast client for longpoll causes "RPC request failed" every 8s.
@@ -60,11 +60,14 @@ mod tests {
         let json = r#"{"result":null,"error":null,"id":"BlockFinder"}"#;
         // Old behaviour: call::<Option<String>> → body.result is None → Err
         let old: anyhow::Result<Option<String>> = decode_response(json);
-        assert!(old.is_err(), "call::<Option<String>> must fail on null (demonstrates the bug)");
+        assert!(
+            old.is_err(),
+            "call::<Option<String>> must fail on null (demonstrates the bug)"
+        );
 
         // New behaviour: call_optional::<String> → Ok(None)
         let new: anyhow::Result<Option<String>> = decode_optional(json);
-        assert!(new.is_ok(),  "call_optional::<String> must succeed on null");
+        assert!(new.is_ok(), "call_optional::<String> must succeed on null");
         assert!(new.unwrap().is_none(), "null result must be Ok(None)");
     }
 
@@ -93,7 +96,10 @@ mod tests {
         let result: anyhow::Result<Option<String>> = decode_optional(json);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("Block not found"), "error message must propagate: {msg}");
+        assert!(
+            msg.contains("Block not found"),
+            "error message must propagate: {msg}"
+        );
         assert!(msg.contains("-25"), "error code must propagate: {msg}");
     }
 
@@ -128,7 +134,13 @@ impl RpcClient {
             .build()
             .expect("build longpoll reqwest client");
 
-        Self { url, user, pass, client, client_longpoll }
+        Self {
+            url,
+            user,
+            pass,
+            client,
+            client_longpoll,
+        }
     }
 
     /// Normal RPC call — 8s timeout. Use for everything except longpoll GBT.
@@ -164,7 +176,8 @@ impl RpcClient {
             "params": params,
         });
 
-        let response = self.client
+        let response = self
+            .client
             .post(&self.url)
             .basic_auth(&self.user, Some(&self.pass))
             .json(&payload)
@@ -175,7 +188,11 @@ impl RpcClient {
         let body = response.json::<RpcResponse<T>>().await?;
 
         if let Some(err) = body.error {
-            return Err(anyhow!("RPC error {method}: {} ({})", err.message, err.code));
+            return Err(anyhow!(
+                "RPC error {method}: {} ({})",
+                err.message,
+                err.code
+            ));
         }
 
         // `body.result` is `None` for a JSON null and `Some(T)` for a real value.
@@ -191,7 +208,8 @@ impl RpcClient {
         method: &str,
         params: serde_json::Value,
     ) -> anyhow::Result<T> {
-        self.call_with_client(&self.client_longpoll, method, params).await
+        self.call_with_client(&self.client_longpoll, method, params)
+            .await
     }
 
     async fn call_with_client<T: DeserializeOwned>(
@@ -219,9 +237,14 @@ impl RpcClient {
         let body = response.json::<RpcResponse<T>>().await?;
 
         if let Some(err) = body.error {
-            return Err(anyhow!("RPC error {method}: {} ({})", err.message, err.code));
+            return Err(anyhow!(
+                "RPC error {method}: {} ({})",
+                err.message,
+                err.code
+            ));
         }
 
-        body.result.ok_or_else(|| anyhow!("RPC {method} returned empty result (status {status})"))
+        body.result
+            .ok_or_else(|| anyhow!("RPC {method} returned empty result (status {status})"))
     }
 }

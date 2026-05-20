@@ -8,8 +8,8 @@ use bitcoin::Address;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::{Mutex, watch};
 use tokio::sync::Semaphore;
+use tokio::sync::{watch, Mutex};
 use tracing::{info, warn};
 
 use crate::config::Config;
@@ -277,14 +277,15 @@ impl TemplateEngine {
 
     fn note_template_refresh_success(&self) {
         self.rpc_healthy.store(true, Ordering::Relaxed);
-        self.last_template_refresh_ms.store(Utc::now().timestamp(), Ordering::Relaxed);
+        self.last_template_refresh_ms
+            .store(Utc::now().timestamp(), Ordering::Relaxed);
     }
 
     fn note_template_refresh_failure(&self) {
-        self.template_refresh_failures.fetch_add(1, Ordering::Relaxed);
+        self.template_refresh_failures
+            .fetch_add(1, Ordering::Relaxed);
         self.rpc_healthy.store(false, Ordering::Relaxed);
     }
-
 
     fn now_ms() -> u64 {
         SystemTime::now()
@@ -312,7 +313,8 @@ impl TemplateEngine {
         self.last_zmq_block_trigger_ms.store(now, Ordering::Relaxed);
         // Arm the TX suppression window so the post-block mempool burst is batched.
         let suppress_ms = self.config.post_block_suppress_ms;
-        self.post_block_suppress_until_ms.store(now + suppress_ms, Ordering::Relaxed);
+        self.post_block_suppress_until_ms
+            .store(now + suppress_ms, Ordering::Relaxed);
         self.counters.reset_clean_jobs_notify_window();
         self.counters.reset_clean_jobs_template_window();
         true
@@ -400,7 +402,9 @@ impl TemplateEngine {
             .await
             {
                 Ok(Ok(())) => {
-                    eprintln!("blackhole-pool init: connected to bitcoind; initial template loaded");
+                    eprintln!(
+                        "blackhole-pool init: connected to bitcoind; initial template loaded"
+                    );
                     info!("connected to bitcoind; initial template loaded");
                     self.note_template_refresh_success();
                     return Ok(());
@@ -430,7 +434,9 @@ impl TemplateEngine {
             }
         }
 
-        eprintln!("blackhole-pool init: initial template warmup failed after {MAX_ATTEMPTS} attempts");
+        eprintln!(
+            "blackhole-pool init: initial template warmup failed after {MAX_ATTEMPTS} attempts"
+        );
         Err(anyhow!(
             "initial template warmup failed after {MAX_ATTEMPTS} attempts; bitcoind/ZMQ may not be ready"
         ))
@@ -465,7 +471,11 @@ impl TemplateEngine {
             // rejection, and Err for network/RPC failures. Using call::<Option<String>>
             // would return Err for the null-success case (serde maps null→None, then
             // ok_or_else converts None to Err), causing false "BLOCK MAY BE LOST" logs.
-            match self.rpc.call_optional::<String>("submitblock", json!([block_hex])).await {
+            match self
+                .rpc
+                .call_optional::<String>("submitblock", json!([block_hex]))
+                .await
+            {
                 Ok(None) => {
                     // null result = Bitcoin Core accepted the block.
                     self.counters.inc_submitblock_accepted();
@@ -475,7 +485,9 @@ impl TemplateEngine {
                 Ok(Some(reason)) => {
                     // Non-null string = Bitcoin Core returned a rejection reason.
                     if reason == "duplicate" {
-                        tracing::warn!("submitblock: already known (duplicate) — block counted as found");
+                        tracing::warn!(
+                            "submitblock: already known (duplicate) — block counted as found"
+                        );
                         self.counters.inc_submitblock_accepted();
                         return Ok(());
                     }
@@ -488,7 +500,11 @@ impl TemplateEngine {
                     //   4. witness_script  → verify 6a24aa21a9ed prefix + 32-byte hash
                     //   5. template_key    → identifies the exact GBT snapshot
                     let category = categorise_reject_reason(&reason);
-                    let header_hex = if block_hex.len() >= 160 { &block_hex[..160] } else { block_hex };
+                    let header_hex = if block_hex.len() >= 160 {
+                        &block_hex[..160]
+                    } else {
+                        block_hex
+                    };
                     tracing::error!(
                         "SUBMITBLOCK REJECTED: reason=\"{}\" category={} hash={} template_key=\"{}\"",
                         reason, category, block_hash_hex, template_key
@@ -517,7 +533,9 @@ impl TemplateEngine {
                         _ => {}
                     }
                     self.counters.inc_submitblock_rejected();
-                    return Err(anyhow!("submitblock rejected: {reason} (category: {category})"));
+                    return Err(anyhow!(
+                        "submitblock rejected: {reason} (category: {category})"
+                    ));
                 }
                 Err(err) => {
                     tracing::error!(
@@ -531,7 +549,8 @@ impl TemplateEngine {
         }
         if let Some(err) = last_submit_err {
             self.counters.inc_submitblock_rpc_fail();
-            return Err(err).context("submitblock RPC failed after all retries — BLOCK MAY BE LOST");
+            return Err(err)
+                .context("submitblock RPC failed after all retries — BLOCK MAY BE LOST");
         }
 
         // Verify the node accepted the block into its block index/mempool processing.
@@ -609,8 +628,10 @@ impl TemplateEngine {
             // The outer tokio::timeout is a belt-and-suspenders backstop only.
             let fetch_result = tokio::time::timeout(
                 Duration::from_secs(LONGPOLL_TIMEOUT_SECS),
-                self.rpc.call_longpoll::<GbtResponse>("getblocktemplate", gbt_params),
-            ).await;
+                self.rpc
+                    .call_longpoll::<GbtResponse>("getblocktemplate", gbt_params),
+            )
+            .await;
 
             match fetch_result {
                 Ok(Ok(gbt)) => {
@@ -956,7 +977,10 @@ impl TemplateEngine {
         self.metrics.set_template_scope(&job_arc).await;
         info!(
             "new template: height={} txs={} coinbase_value={} sat nbits={}",
-            job_arc.height, job_arc.transactions.len(), job_arc.coinbase_value, job_arc.nbits
+            job_arc.height,
+            job_arc.transactions.len(),
+            job_arc.coinbase_value,
+            job_arc.nbits
         );
 
         drop(permit);
@@ -998,31 +1022,38 @@ impl TemplateEngine {
         Ok(())
     }
 
-    async fn build_job(&self, gbt: GbtResponse, template_key: String) -> anyhow::Result<JobTemplate> {
+    async fn build_job(
+        &self,
+        gbt: GbtResponse,
+        template_key: String,
+    ) -> anyhow::Result<JobTemplate> {
         // If the node provides a default witness commitment (SegWit), compute our own commitment
         // to guarantee it matches the witness reserved value we embed in the coinbase witness (32 zero bytes).
-        let computed_witness_commitment = if let Some(ref core_commitment) = gbt.default_witness_commitment {
-            let our_commitment = compute_witness_commitment_script_hex(&gbt.transactions)?;
-            // Verify our computed commitment matches what Bitcoin Core provided.
-            // A mismatch would cause block rejection at submitblock time.
-            // Fall back to Bitcoin Core's known-good value to guarantee block validity.
-            if our_commitment != *core_commitment {
-                warn!(
+        let computed_witness_commitment =
+            if let Some(ref core_commitment) = gbt.default_witness_commitment {
+                let our_commitment = compute_witness_commitment_script_hex(&gbt.transactions)?;
+                // Verify our computed commitment matches what Bitcoin Core provided.
+                // A mismatch would cause block rejection at submitblock time.
+                // Fall back to Bitcoin Core's known-good value to guarantee block validity.
+                if our_commitment != *core_commitment {
+                    warn!(
                     "witness commitment mismatch: ours={} core={} — using Core's value as fallback",
                     our_commitment, core_commitment
                 );
-                Some(core_commitment.clone())
+                    Some(core_commitment.clone())
+                } else {
+                    Some(our_commitment)
+                }
             } else {
-                Some(our_commitment)
-            }
-        } else {
-            None
-        };
+                None
+            };
 
         let coinbase_parts = self.build_coinbase_parts(
             gbt.coinbasevalue,
             gbt.height,
-            gbt.coinbaseaux.as_ref().and_then(|aux| aux.flags.as_deref()),
+            gbt.coinbaseaux
+                .as_ref()
+                .and_then(|aux| aux.flags.as_deref()),
             computed_witness_commitment.as_deref(),
         )?;
         let (coinbase1, coinbase2, coinbase_tx, has_witness_commitment) = coinbase_parts;
@@ -1036,13 +1067,12 @@ impl TemplateEngine {
             // BIP141: block header merkle root MUST use TXIDs (non-witness).
             // Never fall back to hash (wtxid) — that would produce the wrong merkle
             // root and Bitcoin Core would reject the block as invalid.
-            let txid = tx
-                .txid
-                .as_ref()
-                .ok_or_else(|| anyhow!(
+            let txid = tx.txid.as_ref().ok_or_else(|| {
+                anyhow!(
                     "getblocktemplate tx missing `txid` field — required for block header merkle. \
                      Do NOT use `hash` (wtxid) here."
-                ))?;
+                )
+            })?;
             let mut hash = hex::decode(txid)?;
             hash.reverse();
             let hash_bytes: [u8; 32] = hash
@@ -1053,7 +1083,8 @@ impl TemplateEngine {
         }
 
         let merkle_branches_le = build_merkle_branches(coinbase_hash, &tx_hashes);
-        let merkle_branches: Vec<String> = merkle_branches_le.iter().map(|b| hex::encode(b)).collect();
+        let merkle_branches: Vec<String> =
+            merkle_branches_le.iter().map(|b| hex::encode(b)).collect();
 
         // Compute the partial Merkle root of non-coinbase txids (big-endian hex).
         // Used in submitblock repro bundle for post-mortem debugging.
@@ -1062,7 +1093,9 @@ impl TemplateEngine {
         } else {
             let mut h = tx_hashes.clone();
             while h.len() > 1 {
-                if h.len() % 2 == 1 { h.push(*h.last().unwrap()); }
+                if h.len() % 2 == 1 {
+                    h.push(*h.last().unwrap());
+                }
                 h = h.chunks(2).map(|p| merkle_step(&p[0], &p[1])).collect();
             }
             let mut r = h[0];
@@ -1113,7 +1146,11 @@ impl TemplateEngine {
             let exponent = ((nbits_u32 >> 24) & 0xFF) as i32;
             let target_val = mantissa * 256.0f64.powi(exponent - 3);
             let diff1 = 65535.0 * 2.0f64.powi(208); // 0xFFFF × 2^208
-            if target_val > 0.0 { diff1 / target_val } else { 0.0 }
+            if target_val > 0.0 {
+                diff1 / target_val
+            } else {
+                0.0
+            }
         };
 
         let job_id = self.job_counter.fetch_add(1, Ordering::SeqCst).to_string();
@@ -1228,7 +1265,8 @@ impl TemplateEngine {
 
         // Bitcoin Core enforces a max coinbase scriptSig length of 100 bytes.
         let max_scriptsig = 100usize;
-        let total_scriptsig = script_sig.len() + self.config.extranonce1_size + self.config.extranonce2_size;
+        let total_scriptsig =
+            script_sig.len() + self.config.extranonce1_size + self.config.extranonce2_size;
         if total_scriptsig > max_scriptsig {
             return Err(anyhow!(
                 "coinbase scriptSig too long: {} bytes (max {}). Shorten POOL_TAG or COINBASE_MESSAGE.",
@@ -1299,7 +1337,6 @@ impl TemplateEngine {
     }
 }
 
-
 fn compute_witness_commitment_script_hex(txs: &[GbtTx]) -> anyhow::Result<String> {
     // BIP141:
     // commitment = SHA256d(witness_merkle_root || witness_reserved_value)
@@ -1311,17 +1348,19 @@ fn compute_witness_commitment_script_hex(txs: &[GbtTx]) -> anyhow::Result<String
     for tx in txs {
         // BIP141: witness merkle root requires wtxids (the `hash` field from getblocktemplate),
         // NOT txids. Using txid here would produce a wrong commitment that Bitcoin Core rejects.
-        let wtxid_hex = tx
-            .hash
-            .as_ref()
-            .ok_or_else(|| anyhow!(
+        let wtxid_hex = tx.hash.as_ref().ok_or_else(|| {
+            anyhow!(
                 "getblocktemplate tx missing `hash` (wtxid) field — \
                  cannot compute witness commitment. \
                  Ensure Bitcoin Core is running with segwit rules enabled."
-            ))?;
+            )
+        })?;
         let mut b = hex::decode(wtxid_hex).context("decode wtxid")?;
         if b.len() != 32 {
-            return Err(anyhow!("invalid wtxid length: expected 32 bytes, got {}", b.len()));
+            return Err(anyhow!(
+                "invalid wtxid length: expected 32 bytes, got {}",
+                b.len()
+            ));
         }
         b.reverse(); // internal little-endian
         let arr: [u8; 32] = b.try_into().unwrap();
@@ -1334,7 +1373,11 @@ fn compute_witness_commitment_script_hex(txs: &[GbtTx]) -> anyhow::Result<String
         let mut next = Vec::with_capacity((level.len() + 1) / 2);
         for i in (0..level.len()).step_by(2) {
             let left = level[i];
-            let right = if i + 1 < level.len() { level[i + 1] } else { left };
+            let right = if i + 1 < level.len() {
+                level[i + 1]
+            } else {
+                left
+            };
             next.push(merkle_step(&left, &right));
         }
         level = next;
@@ -1416,13 +1459,21 @@ fn compute_txid_partial_root(transactions: &[GbtTx]) -> String {
 }
 
 fn categorise_reject_reason(reason: &str) -> &'static str {
-    if reason.contains("mrklroot") || reason.contains("merkle") { "merkle" }
-    else if reason.contains("witness")   { "witness"    }
-    else if reason.contains("cb-")       { "coinbase"   }
-    else if reason.contains("time")      { "time"       }
-    else if reason.contains("prevblk")   { "stale"      }
-    else if reason.contains("diffbits")  { "difficulty" }
-    else                                 { "unknown"    }
+    if reason.contains("mrklroot") || reason.contains("merkle") {
+        "merkle"
+    } else if reason.contains("witness") {
+        "witness"
+    } else if reason.contains("cb-") {
+        "coinbase"
+    } else if reason.contains("time") {
+        "time"
+    } else if reason.contains("prevblk") {
+        "stale"
+    } else if reason.contains("diffbits") {
+        "difficulty"
+    } else {
+        "unknown"
+    }
 }
 
 /// Public re-export for tests — see `build_merkle_branches`.
@@ -1454,7 +1505,11 @@ fn build_merkle_branches(coinbase_hash: [u8; 32], tx_hashes: &[[u8; 32]]) -> Vec
         let mut next = Vec::with_capacity((level.len() + 1) / 2);
         for i in (0..level.len()).step_by(2) {
             let left = level[i];
-            let right = if i + 1 < level.len() { level[i + 1] } else { left };
+            let right = if i + 1 < level.len() {
+                level[i + 1]
+            } else {
+                left
+            };
             next.push(merkle_step(&left, &right));
         }
         level = next;
@@ -1564,8 +1619,8 @@ pub fn build_coinbase2_for_payout(
 
     // Output 1 (SegWit only): witness commitment (OP_RETURN + 0xaa21a9ed + hash).
     if let Some(hex_str) = witness_commitment_hex {
-        let commitment_script = hex::decode(hex_str)
-            .context("decode witness commitment hex for custom coinbase2")?;
+        let commitment_script =
+            hex::decode(hex_str).context("decode witness commitment hex for custom coinbase2")?;
         out.extend_from_slice(&0u64.to_le_bytes()); // value = 0
         encode_varint(commitment_script.len() as u64, &mut out);
         out.extend_from_slice(&commitment_script);

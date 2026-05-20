@@ -1,5 +1,7 @@
-mod sqlite;
 mod redis;
+mod sqlite;
 
-pub use sqlite::{BlockCandidateRecord, BlockCandidateRow, BlockWindowRow, ShareRecord, SqliteStore};
 pub use redis::RedisStore;
+pub use sqlite::{
+    BlockCandidateRecord, BlockCandidateRow, BlockWindowRow, ShareRecord, SqliteStore,
+};

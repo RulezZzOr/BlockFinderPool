@@ -29,9 +29,7 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("build info: {}", crate::build_info::one_line());
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "info".parse().expect("valid default log filter"));
-    tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .init();
+    tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
     if let Err(err) = run().await {
         eprintln!("blackhole-pool fatal: {err:?}");
@@ -115,7 +113,12 @@ async fn run() -> anyhow::Result<()> {
             Ok(bests) => {
                 for (worker, (best_submitted, best_accepted, best_block_candidate)) in bests {
                     metrics
-                        .set_worker_best(&worker, best_submitted, best_accepted, best_block_candidate)
+                        .set_worker_best(
+                            &worker,
+                            best_submitted,
+                            best_accepted,
+                            best_block_candidate,
+                        )
                         .await;
                 }
                 info!("loaded persisted best-share records from SQLite");
@@ -173,7 +176,8 @@ async fn run() -> anyhow::Result<()> {
     if config.persist_best && sqlite.is_enabled() {
         let metrics_s = metrics.clone();
         let sqlite_s = sqlite.clone();
-        let persist_every = std::time::Duration::from_secs(config.best_persist_interval_secs.max(1));
+        let persist_every =
+            std::time::Duration::from_secs(config.best_persist_interval_secs.max(1));
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(persist_every);
             loop {
@@ -182,8 +186,7 @@ async fn run() -> anyhow::Result<()> {
                 if let Err(err) = sqlite_s.persist_best_snapshot(&snapshot).await {
                     tracing::warn!("best summary persistence failed: {err:?}");
                 }
-                let current_template_age_secs = template_engine
-                    .template_age_secs();
+                let current_template_age_secs = template_engine.template_age_secs();
                 let current_window = metrics_s
                     .current_block_window_snapshot(current_template_age_secs)
                     .await;
@@ -255,5 +258,5 @@ async fn run() -> anyhow::Result<()> {
     }
 
     eprintln!("blackhole-pool init: entering steady state");
-Ok(())
+    Ok(())
 }

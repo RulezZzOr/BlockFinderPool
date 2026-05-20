@@ -1212,6 +1212,12 @@ body::before {
   padding-bottom: 18px;
 }
 
+.bh-histogram-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
 .bh-histogram-subtitle {
   margin-top: -6px;
   margin-bottom: 12px;
@@ -1234,6 +1240,43 @@ body::before {
   white-space: nowrap;
 }
 
+.bh-histogram-badges {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.bh-histogram-top-badge {
+  color: var(--orange);
+  background: var(--orange-lo);
+  border-color: rgba(249,115,22,.22);
+}
+
+.bh-histogram-top-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--orange);
+  box-shadow: 0 0 10px rgba(249,115,22,.45);
+  flex-shrink: 0;
+}
+
+.bh-histogram-empty {
+  min-height: 250px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed rgba(30,42,64,.9);
+  border-radius: var(--radius);
+  background: rgba(255,255,255,.015);
+  color: var(--text2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
 .bh-histogram-card .recharts-wrapper {
   overflow: visible;
 }
@@ -1243,6 +1286,7 @@ body::before {
 }
 
 @media (max-width: 960px) {
+  .bh-histogram-grid,
   .bh-health-grid,
   .bh-health-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1250,9 +1294,16 @@ body::before {
 }
 
 @media (max-width: 640px) {
+  .bh-histogram-grid,
   .bh-health-grid,
   .bh-health-metrics {
     grid-template-columns: 1fr;
+  }
+
+  .bh-histogram-badges {
+    width: 100%;
+    margin-left: 0;
+    justify-content: flex-start;
   }
 
   .bh-health-reason {

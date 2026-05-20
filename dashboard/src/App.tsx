@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import {
-  PoolStats, Miner, NetworkInfo, BlockRow, PublicBlockRow, BlockCandidateRow, BlockWindowRow, HashrateResponse,
+  PoolStats, Miner, NetworkInfo, BlockRow, PublicBlockRow, BlockCandidateRow, BlockWindowRow, HashrateResponse, ShareSizeHistogramResponse,
   fetchDashboardSnapshot,
   fmtHr, fmtDiff, fmtNetHash, fmtUptime, fmtBlockInterval, timeAgo, shortWorker, shortAddress, getFirmwareLabel,
   blockSubsidy, fmtBtc,
@@ -10,6 +10,7 @@ import BlockCandidatesTable from "./components/BlockCandidatesTable";
 import BlockWindowsTable from "./components/BlockWindowsTable";
 import PublicBlocksTable from "./components/PublicBlocksTable";
 import HashrateChart from "./components/HashrateChart";
+import ShareSizeHistogram from "./components/ShareSizeHistogram";
 import "./styles.css";
 
 const REFRESH_MS = 1000;
@@ -1444,6 +1445,7 @@ export default function App() {
   const [blockWindows, setBlockWindows] = useState<BlockWindowRow[]>([]);
   const [publicBlocks, setPublicBlocks] = useState<PublicBlockRow[]>([]);
   const [hashrate, setHashrate] = useState<HashrateResponse | null>(null);
+  const [shareSizeHistogram, setShareSizeHistogram] = useState<ShareSizeHistogramResponse | null>(null);
   const [network, setNetwork] = useState<NetworkInfo | null>(null);
   const [live, setLive] = useState(false);
   const [celebrating, setCelebrating] = useState(false);
@@ -1471,6 +1473,7 @@ export default function App() {
       setBlockWindows(snapshot.blockWindows);
       setHashrate(snapshot.hashrate);
       setPublicBlocks(snapshot.publicBlocks);
+      setShareSizeHistogram(snapshot.shareSizeHistogram);
       setNetwork({
         blocks: p.blockHeight,
         difficulty: p.networkDifficulty,
@@ -1565,10 +1568,13 @@ export default function App() {
       <MiningHealthPanel pool={pool} miners={miners} hashrate={hashrate} />
 
       <div className="bh-section-title" id="bh-histogram">
-        <span>Share Histogram</span>
+        <span>Share Histograms</span>
         <div className="bh-section-line" />
       </div>
-      <HashrateChart data={hashrate?.recent ?? []} />
+      <div className="bh-histogram-grid">
+        <HashrateChart data={hashrate?.recent ?? []} />
+        <ShareSizeHistogram histogram={shareSizeHistogram} />
+      </div>
 
       {/* Miner Fleet */}
       <div className="bh-section-title" id="bh-fleet">

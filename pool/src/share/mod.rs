@@ -11,8 +11,7 @@ use crate::template::JobTemplate;
 // ─── Difficulty constant ──────────────────────────────────────────────────────
 // DIFF1 = 0x00000000FFFF0000…0000 = 0xFFFF × 2^208
 // Used ONLY for metrics/UI display (true_share_diff). NEVER for acceptance/block.
-const DIFF1_TARGET_HEX: &str =
-    "00000000ffff0000000000000000000000000000000000000000000000000000";
+const DIFF1_TARGET_HEX: &str = "00000000ffff0000000000000000000000000000000000000000000000000000";
 static DIFF1_TARGET: OnceLock<BigUint> = OnceLock::new();
 
 fn diff1_target() -> &'static BigUint {
@@ -57,20 +56,20 @@ pub fn share_target_le(diff: f64) -> anyhow::Result<[u8; 32]> {
 // ─── Share I/O ────────────────────────────────────────────────────────────────
 #[derive(Debug, Clone)]
 pub struct ShareSubmit {
-    pub worker:      String,
-    pub job_id:      String,
+    pub worker: String,
+    pub job_id: String,
     pub extranonce2: String,
-    pub ntime:       String,
-    pub nonce:       String,
-    pub version:     Option<String>,
+    pub ntime: String,
+    pub nonce: String,
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ShareResult {
-    pub accepted:   bool,
-    pub is_block:   bool,
-    pub hash_hex:   String,
-    pub block_hex:  Option<String>,
+    pub accepted: bool,
+    pub is_block: bool,
+    pub hash_hex: String,
+    pub block_hex: Option<String>,
     /// The full coinbase tx hex (for submitblock rejection debugging).
     /// Only populated when `is_block` is true.
     pub coinbase_hex: Option<String>,
@@ -92,10 +91,10 @@ pub struct ShareResult {
 /// Using integer comparison avoids all f64 rounding issues at threshold
 /// boundaries and matches Bitcoin Core's exact consensus rules.
 pub fn validate_share(
-    job:               &JobTemplate,
-    coinbase_prefix:   &[u8],
-    submit:            &ShareSubmit,
-    share_target_le:   &[u8; 32],
+    job: &JobTemplate,
+    coinbase_prefix: &[u8],
+    submit: &ShareSubmit,
+    share_target_le: &[u8; 32],
     // Per-session coinbase2 override (bytes). When a miner provides a valid
     // Bitcoin address as their username the pool builds a custom coinbase2 so
     // the block reward goes directly to that address. If None, falls back to
@@ -107,7 +106,10 @@ pub fn validate_share(
     if job.mintime_u32 != 0 && ntime_u32 < job.mintime_u32 {
         return Ok(reject());
     }
-    let now_secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     if (ntime_u32 as u64) > now_secs.saturating_add(7200) {
         return Ok(reject());
     }
@@ -116,11 +118,10 @@ pub fn validate_share(
     // coinbase = coinb1 + enonce1 (cached in prefix) + enonce2 + coinb2
     // coinb2 is either the per-session override (miner's own address) or the
     // pool-wide default stored in the job template.
-    let en2 = hex::decode(submit.extranonce2.trim_start_matches("0x"))
-        .context("extranonce2 decode")?;
+    let en2 =
+        hex::decode(submit.extranonce2.trim_start_matches("0x")).context("extranonce2 decode")?;
     let coinbase2 = coinbase2_override.unwrap_or(&job.coinbase2_bytes);
-    let mut coinbase = Vec::with_capacity(
-        coinbase_prefix.len() + en2.len() + coinbase2.len());
+    let mut coinbase = Vec::with_capacity(coinbase_prefix.len() + en2.len() + coinbase2.len());
     coinbase.extend_from_slice(coinbase_prefix);
     coinbase.extend_from_slice(&en2);
     coinbase.extend_from_slice(coinbase2);
@@ -140,7 +141,8 @@ pub fn validate_share(
     // ── 5. version (with BIP310 rolling if supplied) ─────────────────────────
     // nVersion = (job_version & ~mask) | (submitted_bits & mask)
     // The correct combined value arrives pre-computed from handle_submit.
-    let version_u32 = submit.version
+    let version_u32 = submit
+        .version
         .as_deref()
         .and_then(|v| parse_u32_be(v).ok())
         .unwrap_or(job.version_u32);
@@ -149,8 +151,14 @@ pub fn validate_share(
 
     // ── 6. Block header [80 bytes] ────────────────────────────────────────────
     // All fields little-endian per Bitcoin block format.
-    let header = build_header(version_u32, &job.prevhash_le_bytes, &merkle_root,
-                              ntime_u32, job.nbits_u32, nonce_u32);
+    let header = build_header(
+        version_u32,
+        &job.prevhash_le_bytes,
+        &merkle_root,
+        ntime_u32,
+        job.nbits_u32,
+        nonce_u32,
+    );
 
     // ── 7. Hash = SHA256d(header) ─────────────────────────────────────────────
     let hash_le = double_sha256(&header);
@@ -175,23 +183,40 @@ pub fn validate_share(
     let difficulty = hash_to_display_diff(&hash_le);
 
     let (block_hex, coinbase_hex) = if is_block {
-        let bh = build_block_hex(&header, &coinbase, &job.transactions, job.has_witness_commitment)?;
+        let bh = build_block_hex(
+            &header,
+            &coinbase,
+            &job.transactions,
+            job.has_witness_commitment,
+        )?;
         let ch = hex::encode(&coinbase);
         (Some(bh), Some(ch))
     } else {
         (None, None)
     };
 
-    Ok(ShareResult { accepted, is_block, hash_hex, block_hex, coinbase_hex, header_hex: hex::encode(header), difficulty })
+    Ok(ShareResult {
+        accepted,
+        is_block,
+        hash_hex,
+        block_hex,
+        coinbase_hex,
+        header_hex: hex::encode(header),
+        difficulty,
+    })
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 fn reject() -> ShareResult {
     ShareResult {
-        accepted: false, is_block: false,
-        hash_hex: "0".repeat(64), block_hex: None, coinbase_hex: None,
-        header_hex: String::new(), difficulty: 0.0,
+        accepted: false,
+        is_block: false,
+        hash_hex: "0".repeat(64),
+        block_hex: None,
+        coinbase_hex: None,
+        header_hex: String::new(),
+        difficulty: 0.0,
     }
 }
 
@@ -199,8 +224,12 @@ fn reject() -> ShareResult {
 #[inline]
 pub fn leq_le256(a: &[u8; 32], b: &[u8; 32]) -> bool {
     for i in (0..32).rev() {
-        if a[i] < b[i] { return true; }
-        if a[i] > b[i] { return false; }
+        if a[i] < b[i] {
+            return true;
+        }
+        if a[i] > b[i] {
+            return false;
+        }
     }
     true // equal
 }
@@ -213,12 +242,14 @@ fn hash_to_display_diff(hash_le: &[u8; 32]) -> f64 {
     let mut be = *hash_le;
     be.reverse();
     let hash_val = BigUint::from_bytes_be(&be);
-    if hash_val == BigUint::ZERO { return f64::INFINITY; }
+    if hash_val == BigUint::ZERO {
+        return f64::INFINITY;
+    }
     let q = diff1 / &hash_val;
     let r = diff1 % &hash_val;
     use num_traits::ToPrimitive;
     let q_f64 = q.to_f64().unwrap_or(f64::MAX);
-    let frac  = match (r.to_f64(), hash_val.to_f64()) {
+    let frac = match (r.to_f64(), hash_val.to_f64()) {
         (Some(r), Some(h)) if h > 0.0 => r / h,
         _ => 0.0,
     };
@@ -227,12 +258,12 @@ fn hash_to_display_diff(hash_le: &[u8; 32]) -> f64 {
 
 #[inline]
 fn build_header(
-    version:      u32,
-    prevhash_le:  &[u8; 32],
-    merkle_root:  &[u8; 32],
-    ntime:        u32,
-    nbits:        u32,
-    nonce:        u32,
+    version: u32,
+    prevhash_le: &[u8; 32],
+    merkle_root: &[u8; 32],
+    ntime: u32,
+    nbits: u32,
+    nonce: u32,
 ) -> [u8; 80] {
     let mut h = [0u8; 80];
     h[0..4].copy_from_slice(&version.to_le_bytes());
@@ -252,14 +283,19 @@ fn parse_u32_be(s: &str) -> anyhow::Result<u32> {
 // ─── Block assembly ───────────────────────────────────────────────────────────
 
 fn build_block_hex(
-    header: &[u8; 80], coinbase_legacy: &[u8],
-    txs_hex: &[String], use_witness: bool,
+    header: &[u8; 80],
+    coinbase_legacy: &[u8],
+    txs_hex: &[String],
+    use_witness: bool,
 ) -> anyhow::Result<String> {
     let mut block = Vec::new();
     block.extend_from_slice(header);
     encode_varint(txs_hex.len() as u64 + 1, &mut block);
-    let cb = if use_witness { build_coinbase_with_witness(coinbase_legacy)? }
-             else           { coinbase_legacy.to_vec() };
+    let cb = if use_witness {
+        build_coinbase_with_witness(coinbase_legacy)?
+    } else {
+        coinbase_legacy.to_vec()
+    };
     block.extend_from_slice(&cb);
     for tx_hex in txs_hex {
         block.extend_from_slice(&hex::decode(tx_hex).context("tx decode")?);
@@ -268,7 +304,9 @@ fn build_block_hex(
 }
 
 fn build_coinbase_with_witness(legacy: &[u8]) -> anyhow::Result<Vec<u8>> {
-    if legacy.len() < 8 { return Err(anyhow!("coinbase tx too short")); }
+    if legacy.len() < 8 {
+        return Err(anyhow!("coinbase tx too short"));
+    }
     let (version, rest) = legacy.split_at(4);
     let (core, locktime) = rest.split_at(rest.len() - 4);
     // BIP141 segwit serialization: version | 0x00 marker | 0x01 flag | vin | vout
@@ -288,10 +326,19 @@ fn build_coinbase_with_witness(legacy: &[u8]) -> anyhow::Result<Vec<u8>> {
 
 fn encode_varint(v: u64, out: &mut Vec<u8>) {
     match v {
-        0..=0xfc         => out.push(v as u8),
-        0xfd..=0xffff    => { out.push(0xfd); out.extend_from_slice(&(v as u16).to_le_bytes()); }
-        0x1_0000..=0xffff_ffff => { out.push(0xfe); out.extend_from_slice(&(v as u32).to_le_bytes()); }
-        _                => { out.push(0xff); out.extend_from_slice(&v.to_le_bytes()); }
+        0..=0xfc => out.push(v as u8),
+        0xfd..=0xffff => {
+            out.push(0xfd);
+            out.extend_from_slice(&(v as u16).to_le_bytes());
+        }
+        0x1_0000..=0xffff_ffff => {
+            out.push(0xfe);
+            out.extend_from_slice(&(v as u32).to_le_bytes());
+        }
+        _ => {
+            out.push(0xff);
+            out.extend_from_slice(&v.to_le_bytes());
+        }
     }
 }
 
@@ -309,7 +356,9 @@ mod tests {
         let diff1 = BigUint::from_str_radix(DIFF1_TARGET_HEX, 16).unwrap();
         let target_big = &diff1 / BigUint::from(1_000_000u64);
         let mut target_be = target_big.to_bytes_be();
-        while target_be.len() < 32 { target_be.insert(0, 0); }
+        while target_be.len() < 32 {
+            target_be.insert(0, 0);
+        }
         let mut hash_le: [u8; 32] = target_be.try_into().unwrap();
         hash_le.reverse(); // convert to LE
 
@@ -317,10 +366,15 @@ mod tests {
         let session_diff = 16384.0_f64;
 
         // true_diff should be ~1,000,000 not 16,384
-        assert!(true_diff > 900_000.0,  "true_diff={true_diff} should be ~1M");
-        assert!(true_diff < 1_100_000.0,"true_diff={true_diff} should be ~1M");
-        assert!((true_diff - session_diff).abs() > 100_000.0,
-                "true_diff must NOT equal session_diff");
+        assert!(true_diff > 900_000.0, "true_diff={true_diff} should be ~1M");
+        assert!(
+            true_diff < 1_100_000.0,
+            "true_diff={true_diff} should be ~1M"
+        );
+        assert!(
+            (true_diff - session_diff).abs() > 100_000.0,
+            "true_diff must NOT equal session_diff"
+        );
     }
 
     /// 256-bit integer comparison: hash == target → accepted (edge case).
@@ -333,7 +387,7 @@ mod tests {
     /// hash all-zeros < any non-zero target → accepted.
     #[test]
     fn test_leq_le256_zero_hash() {
-        let hash   = [0u8; 32];
+        let hash = [0u8; 32];
         let target = [0x01u8; 32];
         assert!(leq_le256(&hash, &target));
     }
@@ -341,7 +395,7 @@ mod tests {
     /// hash > target → rejected.
     #[test]
     fn test_leq_le256_hash_too_large() {
-        let hash   = [0xFFu8; 32];
+        let hash = [0xFFu8; 32];
         let target = [0x00u8; 32];
         assert!(!leq_le256(&hash, &target));
     }
@@ -353,7 +407,9 @@ mod tests {
         // diff1 in LE
         let diff1 = BigUint::from_str_radix(DIFF1_TARGET_HEX, 16).unwrap();
         let mut be = diff1.to_bytes_be();
-        while be.len() < 32 { be.insert(0, 0); }
+        while be.len() < 32 {
+            be.insert(0, 0);
+        }
         be.reverse();
         let expected: [u8; 32] = be.try_into().unwrap();
         assert_eq!(target_le, expected);
@@ -371,10 +427,10 @@ mod tests {
     /// Version rolling: nVersion = (job & ~mask) | (bits & mask).
     #[test]
     fn test_version_rolling_bip310() {
-        let job_version:   u32 = 0x2000_0000;
-        let mask:          u32 = 0x1fffe000;
-        let miner_bits:    u32 = 0x003f_4000;
-        let expected:      u32 = (job_version & !mask) | (miner_bits & mask);
+        let job_version: u32 = 0x2000_0000;
+        let mask: u32 = 0x1fffe000;
+        let miner_bits: u32 = 0x003f_4000;
+        let expected: u32 = (job_version & !mask) | (miner_bits & mask);
         // expected = 0x20000000 | 0x003f4000 = 0x203f4000
         assert_eq!(expected, 0x2000_0000 | 0x003f_4000);
         // bits outside mask must come from job
@@ -395,30 +451,34 @@ mod tests {
 
     fn check_outside_mismatch(submit_val: u32, job_val: u32, mask: u32) -> bool {
         let submit_outside = submit_val & !mask;
-        let job_outside    = job_val    & !mask;
+        let job_outside = job_val & !mask;
         submit_outside != 0 && submit_outside != job_outside
     }
 
     /// Miner only rolls bits inside the mask → no violation.
     #[test]
     fn test_version_outside_mask_clean() {
-        let mask:    u32 = 0x1fffe000;
+        let mask: u32 = 0x1fffe000;
         let job_val: u32 = 0x2000_0000;
         // miner rolls some bits inside the mask, doesn't touch bits outside
-        let submit:  u32 = 0x2003_c000; // bits 14–15 set (inside mask)
-        assert!(!check_outside_mismatch(submit, job_val, mask),
-            "bits only inside mask must not trigger violation");
+        let submit: u32 = 0x2003_c000; // bits 14–15 set (inside mask)
+        assert!(
+            !check_outside_mismatch(submit, job_val, mask),
+            "bits only inside mask must not trigger violation"
+        );
     }
 
     /// Miner preserves the job's outside-mask bits (sends them unchanged) → no violation.
     #[test]
     fn test_version_outside_mask_preserved() {
-        let mask:    u32 = 0x1fffe000;
+        let mask: u32 = 0x1fffe000;
         let job_val: u32 = 0x2000_0000;
         // miner sends the same outside-mask bits as the job
-        let submit:  u32 = job_val | 0x0001_c000; // rolls bits 14-16 (inside mask)
-        assert!(!check_outside_mismatch(submit, job_val, mask),
-            "preserved outside-mask bits must not trigger violation");
+        let submit: u32 = job_val | 0x0001_c000; // rolls bits 14-16 (inside mask)
+        assert!(
+            !check_outside_mismatch(submit, job_val, mask),
+            "preserved outside-mask bits must not trigger violation"
+        );
     }
 
     /// Miner sends version 0x0000_0000 when job has bit-29 set (0x2000_0000).
@@ -436,44 +496,57 @@ mod tests {
     /// miner sends.  A miner zeroing outside bits cannot corrupt the version.
     #[test]
     fn test_version_outside_mask_zeroed_by_miner_is_safe() {
-        let mask:    u32 = 0x1fffe000;
+        let mask: u32 = 0x1fffe000;
         let job_val: u32 = 0x2000_0000;
-        let submit:  u32 = 0x0000_0000; // miner zeroes all bits
+        let submit: u32 = 0x0000_0000; // miner zeroes all bits
 
         // NOT a violation: submit_outside = 0, condition submit_outside != 0 is false.
-        assert!(!check_outside_mismatch(submit, job_val, mask),
-            "zero outside bits must NOT trigger violation — combined formula preserves job bits");
+        assert!(
+            !check_outside_mismatch(submit, job_val, mask),
+            "zero outside bits must NOT trigger violation — combined formula preserves job bits"
+        );
 
         // Verify the combined formula correctly uses job's outside bits.
         let combined = (job_val & !mask) | (submit & mask);
-        assert_eq!(combined & !mask, job_val & !mask,
-            "combined must preserve job's outside-mask bits even when submit is 0");
+        assert_eq!(
+            combined & !mask,
+            job_val & !mask,
+            "combined must preserve job's outside-mask bits even when submit is 0"
+        );
     }
 
     /// Miner sets an arbitrary extra outside-mask bit → violation.
     #[test]
     fn test_version_outside_mask_extra_bit() {
-        let mask:    u32 = 0x1fffe000;
+        let mask: u32 = 0x1fffe000;
         let job_val: u32 = 0x2000_0000;
         // miner sets bit 0 (outside mask) — unexpected garbage bit
-        let submit:  u32 = job_val | 0x0000_0001;
-        assert!(check_outside_mismatch(submit, job_val, mask),
-            "extra bit outside mask must trigger violation");
+        let submit: u32 = job_val | 0x0000_0001;
+        assert!(
+            check_outside_mismatch(submit, job_val, mask),
+            "extra bit outside mask must trigger violation"
+        );
     }
 
     /// After violation detection, the pool ALWAYS uses the safe combined formula.
     /// This verifies no miner-supplied garbage leaks into the block header.
     #[test]
     fn test_version_combined_is_always_safe() {
-        let mask:    u32 = 0x1fffe000;
+        let mask: u32 = 0x1fffe000;
         let job_val: u32 = 0x2000_0000;
-        let submit:  u32 = 0x003f_0001; // bits inside AND outside mask
-        // combined must not contain the outside-mask garbage from miner
+        let submit: u32 = 0x003f_0001; // bits inside AND outside mask
+                                       // combined must not contain the outside-mask garbage from miner
         let combined = (job_val & !mask) | (submit & mask);
-        assert_eq!(combined & !mask, job_val & !mask,
-            "outside-mask bits in combined must always come from the job");
-        assert_eq!(combined & mask, submit & mask,
-            "inside-mask bits in combined must come from the miner");
+        assert_eq!(
+            combined & !mask,
+            job_val & !mask,
+            "outside-mask bits in combined must always come from the job"
+        );
+        assert_eq!(
+            combined & mask,
+            submit & mask,
+            "inside-mask bits in combined must come from the miner"
+        );
     }
 
     /// Duplicate key logic: same job + same fields → duplicate.
@@ -487,11 +560,17 @@ mod tests {
     fn test_dup_key_same_job_is_duplicate() {
         let k1 = make_dup_key("1", "aabbccdd", "699f722b", "00000001", "20000000");
         let k2 = make_dup_key("1", "aabbccdd", "699f722b", "00000001", "20000000");
-        assert_eq!(k1, k2, "identical submit on same job must produce the same dup key");
+        assert_eq!(
+            k1, k2,
+            "identical submit on same job must produce the same dup key"
+        );
 
         let mut set = std::collections::HashSet::new();
         assert!(set.insert(k1.clone()), "first submit should be accepted");
-        assert!(!set.insert(k2),        "second identical submit must be rejected as duplicate");
+        assert!(
+            !set.insert(k2),
+            "second identical submit must be rejected as duplicate"
+        );
     }
 
     /// NOT a duplicate: same nonce/ntime/en2/version but DIFFERENT job_id.
@@ -500,12 +579,17 @@ mod tests {
     fn test_dup_key_different_job_is_not_duplicate() {
         let k_job1 = make_dup_key("1", "aabbccdd", "699f722b", "00000001", "20000000");
         let k_job2 = make_dup_key("2", "aabbccdd", "699f722b", "00000001", "20000000");
-        assert_ne!(k_job1, k_job2,
-            "same nonce/ntime/en2 on a different job must NOT be a duplicate");
+        assert_ne!(
+            k_job1, k_job2,
+            "same nonce/ntime/en2 on a different job must NOT be a duplicate"
+        );
 
         let mut set = std::collections::HashSet::new();
         assert!(set.insert(k_job1), "submit on job 1 accepted");
-        assert!(set.insert(k_job2), "submit on job 2 must also be accepted (different job → different header)");
+        assert!(
+            set.insert(k_job2),
+            "submit on job 2 must also be accepted (different job → different header)"
+        );
     }
 
     /// BIP310: same job + same nonce/ntime/en2 but different version bits → not duplicate.
@@ -513,12 +597,17 @@ mod tests {
     fn test_dup_key_different_version_is_not_duplicate() {
         let k_v1 = make_dup_key("1", "aabbccdd", "699f722b", "00000001", "20000000");
         let k_v2 = make_dup_key("1", "aabbccdd", "699f722b", "00000001", "203f4000");
-        assert_ne!(k_v1, k_v2,
-            "same job + same nonce/en2 but different version bits must NOT be a duplicate");
+        assert_ne!(
+            k_v1, k_v2,
+            "same job + same nonce/en2 but different version bits must NOT be a duplicate"
+        );
 
         let mut set = std::collections::HashSet::new();
         assert!(set.insert(k_v1), "version 1 accepted");
-        assert!(set.insert(k_v2), "version 2 must also be accepted (different nVersion → different hash)");
+        assert!(
+            set.insert(k_v2),
+            "version 2 must also be accepted (different nVersion → different hash)"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -569,9 +658,9 @@ mod tests {
         let mut merkle_le = hex::decode(merkle_be_hex).unwrap();
         merkle_le.reverse();
         let merkle_le_arr: [u8; 32] = merkle_le.try_into().unwrap();
-        let ntime:  u32 = 1231006505;
-        let nbits:  u32 = 0x1d00ffff;
-        let nonce:  u32 = 2083236893;
+        let ntime: u32 = 1231006505;
+        let nbits: u32 = 0x1d00ffff;
+        let nonce: u32 = 2083236893;
 
         let header = build_header(version, &prevhash_le, &merkle_le_arr, ntime, nbits, nonce);
 
@@ -579,7 +668,8 @@ mod tests {
         let expected_header_hex =
             "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c";
         assert_eq!(
-            hex::encode(header), expected_header_hex,
+            hex::encode(header),
+            expected_header_hex,
             "genesis block header bytes do not match known vector — endianness bug in build_header"
         );
 
@@ -589,8 +679,7 @@ mod tests {
         hash_be.reverse();
         let hash_display = hex::encode(hash_be);
         assert_eq!(
-            hash_display,
-            "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f",
+            hash_display, "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f",
             "SHA256d of genesis header does not match known hash — SHA256d bug"
         );
     }
@@ -607,7 +696,7 @@ mod tests {
     fn test_merkle_step_is_sha256d_of_concat() {
         use sha2::{Digest, Sha256};
 
-        let left  = [0x11u8; 32];
+        let left = [0x11u8; 32];
         let right = [0x22u8; 32];
 
         // Compute expected: SHA256d(left || right)
@@ -642,15 +731,20 @@ mod tests {
 
         // With no additional transactions, merkle root = coinbase hash.
         let branches = crate::template::build_merkle_branches_pub(coinbase_hash, &[]);
-        assert!(branches.is_empty(), "single-tx block must have zero merkle branches");
+        assert!(
+            branches.is_empty(),
+            "single-tx block must have zero merkle branches"
+        );
 
         // Simulate validate_share's reconstruction loop: zero iterations → root = cb_hash.
         let mut merkle_root = coinbase_hash;
         for branch in &branches {
             merkle_root = merkle_step(&merkle_root, branch);
         }
-        assert_eq!(merkle_root, coinbase_hash,
-            "single-tx merkle root must equal coinbase hash");
+        assert_eq!(
+            merkle_root, coinbase_hash,
+            "single-tx merkle root must equal coinbase hash"
+        );
     }
 
     /// BIP34 coinbase height encoding: prove the pool uses the same encoding as
@@ -679,9 +773,14 @@ mod tests {
                 // encode_script_num equivalent
                 let mut result = Vec::new();
                 let mut absval = hi.unsigned_abs();
-                while absval > 0 { result.push((absval & 0xff) as u8); absval >>= 8; }
+                while absval > 0 {
+                    result.push((absval & 0xff) as u8);
+                    absval >>= 8;
+                }
                 if let Some(last) = result.last_mut() {
-                    if *last & 0x80 != 0 { result.push(0x00); }
+                    if *last & 0x80 != 0 {
+                        result.push(0x00);
+                    }
                 }
                 let mut out = vec![result.len() as u8];
                 out.extend_from_slice(&result);
@@ -690,26 +789,37 @@ mod tests {
         }
 
         // Height 1 (regtest first block): must be OP_1 = 0x51 (single byte)
-        assert_eq!(encode_height(1), vec![0x51],
-            "height=1 must encode as OP_1=0x51 (CScript() << 1)");
+        assert_eq!(
+            encode_height(1),
+            vec![0x51],
+            "height=1 must encode as OP_1=0x51 (CScript() << 1)"
+        );
 
         // Height 16: OP_16 = 0x60
-        assert_eq!(encode_height(16), vec![0x60],
-            "height=16 must encode as OP_16=0x60");
+        assert_eq!(
+            encode_height(16),
+            vec![0x60],
+            "height=16 must encode as OP_16=0x60"
+        );
 
         // Height 17: first pushdata case → {0x01, 0x11}
-        assert_eq!(encode_height(17), vec![0x01, 0x11],
-            "height=17 must use pushdata: 0x01 0x11");
+        assert_eq!(
+            encode_height(17),
+            vec![0x01, 0x11],
+            "height=17 must use pushdata: 0x01 0x11"
+        );
 
         // Height 940659 (live mainnet): 940659 = 0x0E_5A_73 → LE bytes [0x73, 0x5a, 0x0e]
         // With pushdata prefix: [0x03, 0x73, 0x5a, 0x0e]
         let expected = vec![0x03, 0x73, 0x5a, 0x0e];
-        assert_eq!(encode_height(940659), expected,
-            "height=940659 must encode as pushdata [03 73 5a 0e]");
+        assert_eq!(
+            encode_height(940659),
+            expected,
+            "height=940659 must encode as pushdata [03 73 5a 0e]"
+        );
 
         // Height 0: OP_0 = 0x00
-        assert_eq!(encode_height(0), vec![0x00],
-            "height=0 must be OP_0=0x00");
+        assert_eq!(encode_height(0), vec![0x00], "height=0 must be OP_0=0x00");
     }
 
     /// Known-vector: SHA256d of a captured header_hex must equal the captured hash_hex.
@@ -725,8 +835,7 @@ mod tests {
     #[test]
     fn test_sha256d_of_captured_header_matches_logged_hash() {
         // From SHARE_PROOF log at 16:35:01.506, Work6, job_id=2 (live production):
-        let header_hex =
-            "0080c226859d7c05d4fe7c974041e67b36343ebd9644585d54d9010000000000\
+        let header_hex = "0080c226859d7c05d4fe7c974041e67b36343ebd9644585d54d9010000000000\
              000000004739633c5b349e259c3296c3398b75679ed4760318cdf7b91d6665410e\
              5d570c1a80b569ccf00117b413129c";
         // Strip any whitespace that may be inserted by string formatting.
@@ -735,8 +844,8 @@ mod tests {
         // Expected hash (big-endian display from the log):
         let expected_hash_be = "000000000006200e52b3f99303d7c595128aa5f96595c0e02632c17ab2e841f8";
 
-        let header_bytes = hex::decode(&header_clean)
-            .expect("header hex must decode without error");
+        let header_bytes =
+            hex::decode(&header_clean).expect("header hex must decode without error");
         assert_eq!(header_bytes.len(), 80, "header must be exactly 80 bytes");
 
         let hash_le = double_sha256(&header_bytes);
@@ -778,29 +887,49 @@ mod tests {
              4739633c5b349e259c3296c3398b75679ed4760318cdf7b91d6665410e5d570c\
              1a80b569ccf00117b413129c";
         // Strip any whitespace for the assertion
-        let expected_clean: String = expected_header_hex.chars().filter(|c| !c.is_whitespace()).collect();
+        let expected_clean: String = expected_header_hex
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
 
         let version_u32 = u32::from_str_radix("26c28000", 16).unwrap();
-        let prevhash_le_bytes: [u8; 32] = hex::decode(
-            "859d7c05d4fe7c974041e67b36343ebd9644585d54d901000000000000000000"
-        ).unwrap().try_into().unwrap();
-        let ntime  = u32::from_str_radix("1a80b569", 16).unwrap(); // little-endian parsed as BE field
-        let nbits  = u32::from_str_radix("ccf00117", 16).unwrap();
-        let nonce  = u32::from_str_radix("9c1213b4", 16).unwrap();
+        let prevhash_le_bytes: [u8; 32] =
+            hex::decode("859d7c05d4fe7c974041e67b36343ebd9644585d54d901000000000000000000")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let ntime = u32::from_str_radix("1a80b569", 16).unwrap(); // little-endian parsed as BE field
+        let nbits = u32::from_str_radix("ccf00117", 16).unwrap();
+        let nonce = u32::from_str_radix("9c1213b4", 16).unwrap();
 
         // The merkle root lives at bytes 36..68 of expected_clean.
         let expected_bytes = hex::decode(&expected_clean).unwrap();
         let merkle_root_bytes: [u8; 32] = expected_bytes[36..68].try_into().unwrap();
 
-        let header = build_header(version_u32, &prevhash_le_bytes, &merkle_root_bytes, ntime, nbits, nonce);
+        let header = build_header(
+            version_u32,
+            &prevhash_le_bytes,
+            &merkle_root_bytes,
+            ntime,
+            nbits,
+            nonce,
+        );
 
         // Check field positions explicitly.
-        assert_eq!(&header[0..4],  &version_u32.to_le_bytes(),  "version field wrong");
-        assert_eq!(&header[4..36], &prevhash_le_bytes,           "prevhash field wrong");
-        assert_eq!(&header[36..68],&merkle_root_bytes,           "merkle root field wrong");
-        assert_eq!(&header[68..72],&ntime.to_le_bytes(),         "ntime field wrong");
-        assert_eq!(&header[72..76],&nbits.to_le_bytes(),         "nbits field wrong");
-        assert_eq!(&header[76..80],&nonce.to_le_bytes(),         "nonce field wrong");
+        assert_eq!(
+            &header[0..4],
+            &version_u32.to_le_bytes(),
+            "version field wrong"
+        );
+        assert_eq!(&header[4..36], &prevhash_le_bytes, "prevhash field wrong");
+        assert_eq!(
+            &header[36..68],
+            &merkle_root_bytes,
+            "merkle root field wrong"
+        );
+        assert_eq!(&header[68..72], &ntime.to_le_bytes(), "ntime field wrong");
+        assert_eq!(&header[72..76], &nbits.to_le_bytes(), "nbits field wrong");
+        assert_eq!(&header[76..80], &nonce.to_le_bytes(), "nonce field wrong");
         assert_eq!(header.len(), 80, "header must be exactly 80 bytes");
     }
 
@@ -821,13 +950,16 @@ mod tests {
         //
         // Miner computes: merkle_step(coinbase_hash, branch[0]) = A
         //                 merkle_step(A, branch[1])             = root
-        let c  = [0x01u8; 32];
+        let c = [0x01u8; 32];
         let t1 = [0x02u8; 32];
         let t2 = [0x03u8; 32];
 
         let branches = crate::template::build_merkle_branches_pub(c, &[t1, t2]);
         assert_eq!(branches.len(), 2, "three txs should produce 2 branches");
-        assert_eq!(branches[0], t1, "branch[0] should be T1 (sibling of coinbase)");
+        assert_eq!(
+            branches[0], t1,
+            "branch[0] should be T1 (sibling of coinbase)"
+        );
 
         let a = merkle_step(&c, &t1);
         let b = merkle_step(&t2, &t2);
@@ -836,7 +968,10 @@ mod tests {
         // Miner's reconstruction:
         let reconstructed_root = merkle_step(&merkle_step(&c, &branches[0]), &branches[1]);
         let direct_root = merkle_step(&a, &b);
-        assert_eq!(reconstructed_root, direct_root, "miner reconstruction must equal direct root");
+        assert_eq!(
+            reconstructed_root, direct_root,
+            "miner reconstruction must equal direct root"
+        );
     }
 
     /// Prove that share_target_le(1.0) equals the DIFF1 target.
@@ -852,15 +987,20 @@ mod tests {
         diff1_be[5] = 0xff;
         let mut diff1_le = diff1_be;
         diff1_le.reverse();
-        assert_eq!(target, diff1_le,
-            "share_target_le(1.0) must equal the Bitcoin DIFF1 target");
+        assert_eq!(
+            target, diff1_le,
+            "share_target_le(1.0) must equal the Bitcoin DIFF1 target"
+        );
     }
 
     /// Prove leq_le256 edge cases: all bytes equal → true (target includes boundary).
     #[test]
     fn test_leq_le256_boundary_is_included() {
         let t = [0x12u8; 32];
-        assert!(leq_le256(&t, &t), "hash == target must be accepted (≤ not <)");
+        assert!(
+            leq_le256(&t, &t),
+            "hash == target must be accepted (≤ not <)"
+        );
     }
 
     /// Prove leq_le256 highest-byte dominates.
@@ -951,8 +1091,12 @@ mod tests {
             while level.len() > 1 {
                 let mut next = Vec::new();
                 for i in (0..level.len()).step_by(2) {
-                    let left  = level[i];
-                    let right = if i + 1 < level.len() { level[i+1] } else { left };
+                    let left = level[i];
+                    let right = if i + 1 < level.len() {
+                        level[i + 1]
+                    } else {
+                        left
+                    };
                     next.push(merkle_step(&left, &right));
                 }
                 level = next;
@@ -984,16 +1128,23 @@ mod tests {
 
         // Verify structural properties of the script.
         let script_bytes = hex::decode(&computed_hex).unwrap();
-        assert_eq!(script_bytes.len(), 38,
-            "witness commitment script must be exactly 38 bytes");
-        assert_eq!(script_bytes[0], 0x6a,
-            "byte[0] must be OP_RETURN (0x6a)");
-        assert_eq!(script_bytes[1], 0x24,
-            "byte[1] must be PUSHDATA(36=0x24)");
-        assert_eq!(&script_bytes[2..6], &[0xaa, 0x21, 0xa9, 0xed],
-            "bytes[2..6] must be BIP141 magic 0xaa21a9ed");
-        assert_eq!(script_bytes.len() - 6, 32,
-            "commitment payload must be exactly 32 bytes");
+        assert_eq!(
+            script_bytes.len(),
+            38,
+            "witness commitment script must be exactly 38 bytes"
+        );
+        assert_eq!(script_bytes[0], 0x6a, "byte[0] must be OP_RETURN (0x6a)");
+        assert_eq!(script_bytes[1], 0x24, "byte[1] must be PUSHDATA(36=0x24)");
+        assert_eq!(
+            &script_bytes[2..6],
+            &[0xaa, 0x21, 0xa9, 0xed],
+            "bytes[2..6] must be BIP141 magic 0xaa21a9ed"
+        );
+        assert_eq!(
+            script_bytes.len() - 6,
+            32,
+            "commitment payload must be exactly 32 bytes"
+        );
     }
 
     /// Witness commitment with zero transactions (empty block, coinbase only).
@@ -1006,7 +1157,7 @@ mod tests {
         // No transactions → leaf list = [coinbase_wtxid=0x00..00]
         // merkle root of one leaf = the leaf itself = 0x00..00
         let witness_merkle_root = [0u8; 32]; // single-leaf tree = the leaf
-        let reserved             = [0u8; 32];
+        let reserved = [0u8; 32];
 
         let mut inp = [0u8; 64];
         inp[..32].copy_from_slice(&witness_merkle_root);
@@ -1021,25 +1172,29 @@ mod tests {
 
         // Same pool formula but with empty tx list:
         let mut level: Vec<[u8; 32]> = vec![[0u8; 32]]; // coinbase only
-        // single-element tree exits immediately: root = level[0] = 0x00..00
+                                                        // single-element tree exits immediately: root = level[0] = 0x00..00
         while level.len() > 1 {
             let mut next = Vec::new();
             for i in (0..level.len()).step_by(2) {
                 let l = level[i];
-                let r = if i + 1 < level.len() { level[i+1] } else { l };
+                let r = if i + 1 < level.len() { level[i + 1] } else { l };
                 next.push(merkle_step(&l, &r));
             }
             level = next;
         }
         let root = level[0];
-        assert_eq!(root, [0u8; 32],
-            "single-coinbase witness merkle root must be 0x00..00");
+        assert_eq!(
+            root, [0u8; 32],
+            "single-coinbase witness merkle root must be 0x00..00"
+        );
 
         let mut inp2 = [0u8; 64];
         inp2[..32].copy_from_slice(&root);
         let pool_commitment = double_sha256(&inp2);
-        assert_eq!(pool_commitment, commitment,
-            "empty-block witness commitment must match independent computation");
+        assert_eq!(
+            pool_commitment, commitment,
+            "empty-block witness commitment must match independent computation"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -1068,7 +1223,8 @@ mod tests {
         // ── Fixed parameters ──────────────────────────────────────────────
         // We choose a very easy "network" difficulty so that nonce=0 is almost
         // certainly a valid block AND a valid share.
-        let coinbase1_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff08";
+        let coinbase1_hex =
+            "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff08";
         // coinbase2: sequence + 1 output (6.25 BTC to OP_TRUE = P2PK-anyone-can-spend)
         // seq(4) + vout_count(1) + value(8 LE) + script_len(1) + OP_TRUE(1) + locktime(4)
         // ffffffff  01  80f0fa0200000000  01  51  00000000
@@ -1080,8 +1236,8 @@ mod tests {
         let prevhash_le = [0u8; 32];
         // version = 1, nbits = 0x207fffff (regtest — almost any hash is valid)
         let version_u32: u32 = 1;
-        let nbits_u32:   u32 = 0x207fffff;
-        let ntime_u32:   u32 = 1296688602; // genesis block timestamp (well in the past)
+        let nbits_u32: u32 = 0x207fffff;
+        let ntime_u32: u32 = 1296688602; // genesis block timestamp (well in the past)
 
         // ── Build coinbase independently ──────────────────────────────────
         let en1 = hex::decode(extranonce1_hex).unwrap();
@@ -1129,9 +1285,9 @@ mod tests {
         let mut target_be = [0u8; 32];
         if exp >= 3 && exp <= 32 {
             let offset = 32 - exp;
-            target_be[offset]   = ((mantissa >> 16) & 0xff) as u8;
-            target_be[offset+1] = ((mantissa >>  8) & 0xff) as u8;
-            target_be[offset+2] = ( mantissa        & 0xff) as u8;
+            target_be[offset] = ((mantissa >> 16) & 0xff) as u8;
+            target_be[offset + 1] = ((mantissa >> 8) & 0xff) as u8;
+            target_be[offset + 2] = (mantissa & 0xff) as u8;
         }
         let mut target_le = target_be;
         target_le.reverse();
@@ -1214,7 +1370,8 @@ mod tests {
         assert!(
             result.is_block,
             "hash below target_le must trigger is_block=true\n\
-             hash={}", result.hash_hex
+             hash={}",
+            result.hash_hex
         );
 
         assert!(
@@ -1224,9 +1381,13 @@ mod tests {
 
         // Block hex must start with the 80-byte header we built.
         let block_bytes = hex::decode(result.block_hex.as_ref().unwrap()).unwrap();
-        assert!(block_bytes.len() >= 80, "block_hex must be at least 80 bytes");
+        assert!(
+            block_bytes.len() >= 80,
+            "block_hex must be at least 80 bytes"
+        );
         assert_eq!(
-            &block_bytes[..80], &header,
+            &block_bytes[..80],
+            &header,
             "first 80 bytes of block_hex must equal the 80-byte header"
         );
 
@@ -1238,10 +1399,14 @@ mod tests {
 
         // Verify header_hex is the 80-byte header we built.
         let header_from_result = hex::decode(&result.header_hex).unwrap();
-        assert_eq!(header_from_result.len(), 80,
-            "header_hex must decode to exactly 80 bytes");
         assert_eq!(
-            header_from_result.as_slice(), &header,
+            header_from_result.len(),
+            80,
+            "header_hex must decode to exactly 80 bytes"
+        );
+        assert_eq!(
+            header_from_result.as_slice(),
+            &header,
             "header_hex must match our independently constructed header"
         );
     }
@@ -1263,7 +1428,8 @@ mod tests {
         // No real hash will ever equal exactly zero → both accepted and is_block = false.
         let impossible_target = [0u8; 32];
 
-        let coinbase1_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff08";
+        let coinbase1_hex =
+            "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff08";
         let coinbase2_hex = "ffffffff0180f0fa020000000001510000000000000000";
         let en1 = hex::decode("aabbccdd").unwrap();
         let cb1 = hex::decode(coinbase1_hex).unwrap();
@@ -1320,12 +1486,14 @@ mod tests {
         assert!(
             !result.accepted,
             "share MUST be rejected: hash cannot equal 0x00..00 (impossible target)\n\
-             hash={}", result.hash_hex
+             hash={}",
+            result.hash_hex
         );
         assert!(
             !result.is_block,
             "is_block must be false: hash cannot equal 0x00..00 (impossible network target)\n\
-             hash={}", result.hash_hex
+             hash={}",
+            result.hash_hex
         );
         assert!(
             result.block_hex.is_none(),
@@ -1334,7 +1502,10 @@ mod tests {
 
         // Also verify: the hash field is populated even for rejected shares
         // (so the pool can log what was submitted).
-        assert_eq!(result.hash_hex.len(), 64,
-            "hash_hex must be 64 hex chars (32 bytes) even for rejected shares");
+        assert_eq!(
+            result.hash_hex.len(),
+            64,
+            "hash_hex must be 64 hex chars (32 bytes) even for rejected shares"
+        );
     }
 }
