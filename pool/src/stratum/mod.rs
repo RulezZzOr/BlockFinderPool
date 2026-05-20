@@ -493,13 +493,20 @@ impl StratumServer {
                     let _ = tx.send(response.to_string()).await;
 
                     if authorized {
-                        let recent_difficulty = self
-                            .metrics
-                            .worker_last_difficulty(&worker)
-                            .filter(|value| value.is_finite() && *value > 0.0)
-                            .map(|value| {
-                                value.clamp(self.config.min_difficulty, self.config.max_difficulty)
-                            });
+                        let fixed_difficulty = self.config.fixed_difficulty_for_worker(&worker);
+                        let recent_difficulty = if fixed_difficulty.is_none() {
+                            self.metrics
+                                .worker_last_difficulty(&worker)
+                                .filter(|value| value.is_finite() && *value > 0.0)
+                                .map(|value| {
+                                    value.clamp(
+                                        self.config.min_difficulty,
+                                        self.config.max_difficulty,
+                                    )
+                                })
+                        } else {
+                            None
+                        };
                         let restored_vardiff = recent_difficulty.and_then(|_| {
                             self.vardiff_cache
                                 .get(&worker)
@@ -513,8 +520,9 @@ impl StratumServer {
                                     )
                                 })
                         });
-                        let restored_difficulty =
-                            recent_difficulty.unwrap_or(self.config.start_difficulty);
+                        let restored_difficulty = fixed_difficulty
+                            .or(recent_difficulty)
+                            .unwrap_or(self.config.start_difficulty);
 
                         // Update session state quickly, but don't await while holding the lock.
                         let (difficulty, user_agent, session_id, extranonce1, diff_msg, notify_opt) = {
@@ -523,6 +531,9 @@ impl StratumServer {
                             guard.worker = worker.clone();
                             guard.session_payout_script = payout_script;
                             guard.session_payout_address = payout_address_str.clone();
+                            guard.fixed_difficulty = fixed_difficulty;
+                            guard.vardiff_enabled =
+                                fixed_difficulty.is_none() && self.config.vardiff_enabled;
                             guard.set_difficulty(restored_difficulty);
                             if let Some(controller) = restored_vardiff {
                                 guard.vardiff = controller;
@@ -623,19 +634,27 @@ impl StratumServer {
                     // Release lock before any async send to avoid holding Mutex across await.
                     let (diff_msg, notify_msg) = {
                         let mut guard = state.lock().await;
-                        let raw = if guard.vardiff_enabled {
-                            // Vardiff active: allow raising immediately, never lower
-                            // (vardiff handles downward adjustment on its own schedule).
-                            suggested
-                                .clamp(self.config.min_difficulty, self.config.max_difficulty)
-                                .max(guard.difficulty)
+                        let target = if let Some(fixed_difficulty) = guard.fixed_difficulty {
+                            // Rental proxies may emit mining.suggest_difficulty per transient
+                            // connection. Fixed worker rules must win, otherwise the proxy can
+                            // reset the session back into global difficulty policy.
+                            fixed_difficulty
                         } else {
-                            // Fixed-diff mode: honour suggestion freely within min/max.
-                            suggested.clamp(self.config.min_difficulty, self.config.max_difficulty)
+                            let raw = if guard.vardiff_enabled {
+                                // Vardiff active: allow raising immediately, never lower
+                                // (vardiff handles downward adjustment on its own schedule).
+                                suggested
+                                    .clamp(self.config.min_difficulty, self.config.max_difficulty)
+                                    .max(guard.difficulty)
+                            } else {
+                                // Fixed-diff mode: honour suggestion freely within min/max.
+                                suggested
+                                    .clamp(self.config.min_difficulty, self.config.max_difficulty)
+                            };
+                            // Keep exact integer difficulty steps so vardiff can move
+                            // down smoothly instead of getting stuck on coarse buckets.
+                            guard.vardiff.clamp_diff(raw)
                         };
-                        // Keep exact integer difficulty steps so vardiff can move
-                        // down smoothly instead of getting stuck on coarse buckets.
-                        let target = guard.vardiff.clamp_diff(raw);
                         if (target - guard.difficulty).abs() > f64::EPSILON {
                             guard.set_difficulty(target);
                             let diff_msg = build_set_difficulty(target);
@@ -1645,6 +1664,7 @@ struct SessionState {
     extranonce1: String,
     extranonce1_bytes: Vec<u8>,
     difficulty: f64,
+    fixed_difficulty: Option<f64>,
     /// scriptPubKey bytes derived from the miner's worker username when it is a
     /// valid Bitcoin address. Set at `mining.authorize` time and used in every
     /// subsequent `push_job` call to build a per-session coinbase2 so the block
@@ -1713,6 +1733,7 @@ impl SessionState {
             extranonce1,
             extranonce1_bytes,
             difficulty: initial_diff,
+            fixed_difficulty: None,
             session_payout_script: None,
             session_payout_address: None,
             share_target_cache: share_target_le(initial_diff).unwrap_or([0xFF; 32]),

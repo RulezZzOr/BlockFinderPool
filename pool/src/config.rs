@@ -5,12 +5,19 @@ use bitcoin::Network;
 fn opt_trimmed(var: &str) -> Option<String> {
     std::env::var(var).ok().and_then(|v| {
         let t = v.trim().to_string();
-        if t.is_empty() { None } else { Some(t) }
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
     })
 }
 
 fn parse_bool(var: &str, default: bool) -> bool {
-    match std::env::var(var).ok().map(|v| v.trim().to_ascii_lowercase()) {
+    match std::env::var(var)
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase())
+    {
         None => default,
         Some(v) if v.is_empty() => default,
         Some(v) if matches!(v.as_str(), "1" | "true" | "yes" | "y" | "on") => true,
@@ -19,6 +26,40 @@ fn parse_bool(var: &str, default: bool) -> bool {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct FixedDiffRule {
+    pattern: String,
+    difficulty: f64,
+}
+
+fn parse_fixed_diff_workers(raw: &str) -> anyhow::Result<Vec<FixedDiffRule>> {
+    let mut rules = Vec::new();
+    for entry in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        let (pattern, difficulty) = entry.split_once(':').ok_or_else(|| {
+            anyhow::anyhow!("FIXED_DIFF_WORKERS entry must be pattern:difficulty")
+        })?;
+        let pattern = pattern.trim().trim_start_matches('.').to_ascii_lowercase();
+        if pattern.is_empty() {
+            bail!("FIXED_DIFF_WORKERS pattern must not be empty");
+        }
+        let difficulty: f64 = difficulty
+            .trim()
+            .parse()
+            .context("FIXED_DIFF_WORKERS difficulty must be a number")?;
+        if !difficulty.is_finite() || difficulty <= 0.0 {
+            bail!("FIXED_DIFF_WORKERS difficulty must be finite and > 0");
+        }
+        rules.push(FixedDiffRule {
+            pattern,
+            difficulty,
+        });
+    }
+    Ok(rules)
+}
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -49,6 +90,7 @@ pub struct Config {
     pub target_share_time_secs: f64,
     pub vardiff_retarget_time_secs: f64,
     pub vardiff_enabled: bool,
+    pub fixed_diff_workers: Vec<FixedDiffRule>,
     /// Shares arriving this soon after TCP connect are marked as reconnect-related
     /// for diagnostics. This does not affect share acceptance.
     pub reconnect_recent_secs: i64,
@@ -57,7 +99,6 @@ pub struct Config {
     pub template_max_age_secs: u64,
     // notify_throttle_ms removed — replaced by token bucket (NOTIFY_BUCKET_CAPACITY /
     // NOTIFY_BUCKET_REFILL_MS). clean_jobs=true always bypasses the bucket entirely.
-
     /// Maximum number of tokens the per-session notify bucket can hold (burst capacity).
     /// Default 2: miner can receive 2 back-to-back mempool-update notifies at connect time.
     pub notify_bucket_capacity: f64,
@@ -187,7 +228,9 @@ impl Config {
             .unwrap_or_else(|_| "30".to_string())
             .parse()
             .context("VARDIFF_RETARGET_SECS must be a number")?;
-                let vardiff_enabled = parse_bool("VARDIFF_ENABLED", true);
+        let vardiff_enabled = parse_bool("VARDIFF_ENABLED", true);
+        let fixed_diff_workers =
+            parse_fixed_diff_workers(&env::var("FIXED_DIFF_WORKERS").unwrap_or_default())?;
         let reconnect_recent_secs = env::var("RECONNECT_RECENT_SECS")
             .unwrap_or_else(|_| "15".to_string())
             .parse()
@@ -222,18 +265,16 @@ impl Config {
             .parse()
             .context("POST_BLOCK_SUPPRESS_MS must be a number")?;
 
-        let auth_token = env::var("AUTH_TOKEN")
-            .ok()
-            .and_then(|token| {
-                let trimmed = token.trim().to_string();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed)
-                }
-            });
+        let auth_token = env::var("AUTH_TOKEN").ok().and_then(|token| {
+            let trimmed = token.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
         let require_auth_token = parse_bool("REQUIRE_AUTH_TOKEN", false);
-                let redis_url = opt_trimmed("REDIS_URL");
+        let redis_url = opt_trimmed("REDIS_URL");
         let database_url = opt_trimmed("DATABASE_URL");
 
         let solo_mode = parse_bool("SOLO_MODE", true);
@@ -277,6 +318,7 @@ impl Config {
             target_share_time_secs,
             vardiff_retarget_time_secs,
             vardiff_enabled,
+            fixed_diff_workers,
             reconnect_recent_secs,
             job_refresh_ms,
             template_poll_ms,
@@ -297,5 +339,87 @@ impl Config {
             best_persist_interval_secs,
             share_proof_limit,
         })
+    }
+
+    pub fn fixed_difficulty_for_worker(&self, worker: &str) -> Option<f64> {
+        let worker = worker.trim().to_ascii_lowercase();
+        let worker_suffix = worker.rsplit('.').next().unwrap_or(worker.as_str());
+        self.fixed_diff_workers
+            .iter()
+            .find(|rule| worker == rule.pattern || worker_suffix == rule.pattern)
+            .map(|rule| rule.difficulty)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_fixed_diff_workers() {
+        let rules = parse_fixed_diff_workers("brain:8388608, bc1qabc.worker:16777216").unwrap();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].pattern, "brain");
+        assert_eq!(rules[0].difficulty, 8_388_608.0);
+        assert_eq!(rules[1].pattern, "bc1qabc.worker");
+        assert_eq!(rules[1].difficulty, 16_777_216.0);
+    }
+
+    #[test]
+    fn fixed_diff_matches_worker_suffix_or_full_name() {
+        let cfg = Config {
+            network: Network::Bitcoin,
+            stratum_bind: String::new(),
+            stratum_port: 3333,
+            api_bind: String::new(),
+            api_port: 8080,
+            api_enabled: true,
+            rpc_url: String::new(),
+            rpc_user: String::new(),
+            rpc_pass: String::new(),
+            zmq_block_urls: vec![],
+            zmq_tx_urls: vec![],
+            payout_address: String::new(),
+            payout_script_hex: None,
+            pool_tag: String::new(),
+            coinbase_message: String::new(),
+            extranonce1_size: 4,
+            extranonce2_size: 8,
+            min_difficulty: 1.0,
+            max_difficulty: 100_000_000.0,
+            start_difficulty: 1.0,
+            target_share_time_secs: 15.0,
+            vardiff_retarget_time_secs: 30.0,
+            vardiff_enabled: true,
+            fixed_diff_workers: parse_fixed_diff_workers("brain:8388608,full.worker:4096").unwrap(),
+            reconnect_recent_secs: 15,
+            job_refresh_ms: 30000,
+            template_poll_ms: 30000,
+            template_max_age_secs: 20,
+            notify_bucket_capacity: 2.0,
+            notify_bucket_refill_ms: 1500.0,
+            zmq_debounce_ms: 1500,
+            post_block_suppress_ms: 8000,
+            auth_token: None,
+            require_auth_token: false,
+            redis_url: None,
+            database_url: None,
+            solo_mode: true,
+            persist_shares: false,
+            persist_blocks: true,
+            persist_best: true,
+            best_persist_interval_secs: 10,
+            share_proof_limit: 0,
+        };
+
+        assert_eq!(
+            cfg.fixed_difficulty_for_worker("bc1qabc.brain"),
+            Some(8_388_608.0)
+        );
+        assert_eq!(
+            cfg.fixed_difficulty_for_worker("full.worker"),
+            Some(4_096.0)
+        );
+        assert_eq!(cfg.fixed_difficulty_for_worker("bc1qabc.s19"), None);
     }
 }
