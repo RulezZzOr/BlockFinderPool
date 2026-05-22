@@ -16,12 +16,17 @@ services:
     cpuset: "2-3"
     network_mode: host
     restart: unless-stopped
+    labels:
+      autoheal: "true"
     healthcheck:
-      test: ["CMD-SHELL", "grep -q ':1F90 ' /proc/net/tcp || grep -q ':1F90 ' /proc/net/tcp6"]
+      test:
+        [
+          "CMD-SHELL",
+          "nc -z 127.0.0.1 \"$${STRATUM_PORT}\" && ( [ \"$${API_ENABLED}\" != \"true\" ] || nc -z 127.0.0.1 \"$${API_PORT}\" )",
+        ]
       interval: 30s
       timeout: 3s
-      retries: 6
-      start_period: 240s
+      retries: 20
     volumes:
       - pool_data:/data
 
@@ -57,12 +62,17 @@ services:
     cpuset: "2-3"
     network_mode: host
     restart: unless-stopped
+    labels:
+      autoheal: "true"
     healthcheck:
-      test: ["CMD-SHELL", "grep -q ':115C ' /proc/net/tcp || grep -q ':115C ' /proc/net/tcp6"]
+      test:
+        [
+          "CMD-SHELL",
+          "nc -z 127.0.0.1 \"$${STRATUM_PORT}\" && ( [ \"$${API_ENABLED}\" != \"true\" ] || nc -z 127.0.0.1 \"$${API_PORT}\" )",
+        ]
       interval: 30s
       timeout: 3s
-      retries: 6
-      start_period: 240s
+      retries: 20
     volumes:
       - pool_rental_data:/data
 
@@ -73,6 +83,26 @@ services:
     restart: unless-stopped
     depends_on:
       - blackhole-pool
+
+  blockfinder-autoheal:
+    image: docker:cli
+    restart: unless-stopped
+    environment:
+      AUTOHEAL_INTERVAL_SECS: ${AUTOHEAL_INTERVAL_SECS:-30}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    entrypoint: ["/bin/sh", "-ec"]
+    command: >
+      while true; do
+        for cid in $$(docker ps -q --filter label=autoheal=true); do
+          status="$$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$$cid" 2>/dev/null || true)";
+          if [ "$$status" = "unhealthy" ]; then
+            echo "autoheal: restarting $$cid";
+            docker restart "$$cid" >/dev/null || true;
+          fi;
+        done;
+        sleep "$${AUTOHEAL_INTERVAL_SECS}";
+      done
 
 volumes:
   pool_data:
