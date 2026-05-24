@@ -16,6 +16,10 @@ services:
     cpuset: "2-3"
     network_mode: host
     restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     labels:
       autoheal: "true"
     healthcheck:
@@ -45,18 +49,8 @@ services:
       AUTOHEAL_INTERVAL_SECS: ${AUTOHEAL_INTERVAL_SECS:-30}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-    entrypoint: ["/bin/sh", "-ec"]
-    command: >
-      while true; do
-        for cid in $$(docker ps -q --filter label=autoheal=true); do
-          status="$$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$$cid" 2>/dev/null || true)";
-          if [ "$$status" = "unhealthy" ]; then
-            echo "autoheal: restarting $$cid";
-            docker restart "$$cid" >/dev/null || true;
-          fi;
-        done;
-        sleep "$${AUTOHEAL_INTERVAL_SECS}";
-      done
+      - ./scripts/autoheal.sh:/usr/local/bin/autoheal.sh:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/autoheal.sh"]
 
 volumes:
   pool_data:
