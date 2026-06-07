@@ -19,6 +19,11 @@ const HYSTERESIS_DOWN: f64 = 1.15;
 //   Only fires when truly offline, not from statistical variance.
 const OFFLINE_SECS: f64 = 120.0; // 2 minutes
 
+// NO_SHARE_RESCUE_SECS: if no accepted share has arrived for this long,
+// lower difficulty aggressively even if the sliding sample window still
+// contains old shares. This makes slow miners recover faster.
+const NO_SHARE_RESCUE_SECS: f64 = 60.0; // 1 minute
+
 // CACHE_SIZE: sliding window of recent shares for hashrate estimation.
 const CACHE_SIZE: usize = 30;
 
@@ -132,6 +137,20 @@ impl VardiffController {
         }
         self.last_retarget = now;
         self.prune_old_samples(now);
+
+        // ── No-share rescue ─────────────────────────────────────────────────
+        // If the miner has not produced an accepted share for a full minute,
+        // lower difficulty even if the sample window still contains older shares.
+        // This keeps low-hash miners from getting stuck at a too-high diff.
+        if let Some(last_share_at) = self.last_share_at {
+            let age_s = (now - last_share_at).num_seconds() as f64;
+            if age_s > NO_SHARE_RESCUE_SECS {
+                let stepped = self.clamp_diff((current_diff / 6.0).max(self.min_diff));
+                if (stepped - current_diff).abs() > f64::EPSILON {
+                    return Some(stepped);
+                }
+            }
+        }
 
         // ── Offline rescue ────────────────────────────────────────────────────
         // Zero shares for OFFLINE_SECS → miner truly stopped. Cut difficulty.
@@ -248,6 +267,18 @@ mod tests {
         assert!(r.is_some());
         let new_d = r.unwrap();
         // 16384 / 6 = 2730.666..., rounded to the nearest integer.
+        assert_eq!(new_d, 2731.0);
+    }
+
+    /// No-share rescue: if no accepted shares arrive for 60s, difficulty should cut.
+    #[test]
+    fn test_no_share_rescue_after_one_minute() {
+        let mut vc = make_vc(10.0);
+        let start = Utc::now();
+        vc.record_share(start, 16384.0);
+        let r = vc.maybe_retarget(16384.0, start + Duration::seconds(61));
+        assert!(r.is_some());
+        let new_d = r.unwrap();
         assert_eq!(new_d, 2731.0);
     }
 

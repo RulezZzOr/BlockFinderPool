@@ -21,6 +21,7 @@ use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex};
+use tokio::time::sleep;
 use tracing::{info, warn};
 
 /// Maximum byte length of a single Stratum line (including trailing `\n`).
@@ -91,7 +92,15 @@ impl StratumServer {
         info!("stratum listening on {bind}");
 
         loop {
-            let (stream, addr) = listener.accept().await?;
+            let (stream, addr) = match listener.accept().await {
+                Ok(result) => result,
+                Err(err) if err.raw_os_error() == Some(24) => {
+                    warn!("stratum accept hit EMFILE (too many open files); backing off 1s");
+                    sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+                Err(err) => return Err(err.into()),
+            };
             let server = self.clone();
             tokio::spawn(async move {
                 if let Err(err) = server.handle_client(stream, addr).await {
