@@ -232,7 +232,7 @@ impl Config {
         let fixed_diff_workers =
             parse_fixed_diff_workers(&env::var("FIXED_DIFF_WORKERS").unwrap_or_default())?;
         let reconnect_recent_secs = env::var("RECONNECT_RECENT_SECS")
-            .unwrap_or_else(|_| "15".to_string())
+            .unwrap_or_else(|_| "300".to_string())
             .parse()
             .context("RECONNECT_RECENT_SECS must be a number")?;
 
@@ -392,7 +392,7 @@ mod tests {
             vardiff_retarget_time_secs: 30.0,
             vardiff_enabled: true,
             fixed_diff_workers: parse_fixed_diff_workers("brain:8388608,full.worker:4096").unwrap(),
-            reconnect_recent_secs: 15,
+            reconnect_recent_secs: 300,
             job_refresh_ms: 30000,
             template_poll_ms: 30000,
             template_max_age_secs: 20,
